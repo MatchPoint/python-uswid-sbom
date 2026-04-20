@@ -1,0 +1,42 @@
+[build-system]
+requires = [
+    "setuptools>=77",
+    "setuptools-scm>=8",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uswid"
+authors = [{name = "Richard Hughes", email = "richard@hughsie.com"}]
+license = "BSD-2-Clause-Patent"
+license-files = ["LICENSE"]
+keywords = ["swid", "sbom", "coswid"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+    "Topic :: System :: Archiving",
+]
+description = "A pure-python library for embedding CoSWID data"
+readme = "README.md"
+dependencies = [
+    "cbor2",
+    "lxml",
+    "pefile",
+    "importlib-metadata >= 1.0 ; python_version < '3.8'",
+]
+dynamic = [
+  "version",
+]
+
+[project.urls]
+Homepage = "https://github.com/hughsie/python-uswid"
+
+[project.scripts]
+uswid = "uswid.cli:main"
+
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
+version_file = "uswid/_version.py"

@@ -2,9 +2,25 @@
 # -*- coding: utf-8 -*-
 #
 # Copyright (C) 2021 Richard Hughes <richard@hughsie.com>
+# (c) Copyright 2026 HP Development Company, L.P.
 #
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 
+try:
+    from ._version import version as __version__
+except (ImportError, AttributeError):
+    __version__ = "0.0.0+unknown"
+else:
+    if __version__ == "0.0.0":
+        try:
+            from importlib.metadata import PackageNotFoundError, version as _meta_version
+        except ImportError:
+            from importlib_metadata import PackageNotFoundError, version as _meta_version
+
+        try:
+            __version__ = _meta_version("uswid")
+        except PackageNotFoundError:
+            __version__ = "0.0.0+unknown"
 from uswid.container import uSwidContainer
 from uswid.link import uSwidLink, uSwidLinkRel, uSwidLinkUse
 from uswid.hash import uSwidHash, uSwidHashAlg

@@ -14,6 +14,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from uswid import __version__
+
 from .container import uSwidContainer
 from .format import uSwidFormatBase
 from .component import uSwidComponent, uSwidComponentType
@@ -346,7 +348,7 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
 
         # generator
         metadata["tools"] = [
-            {"vendor": "uSWID Authors", "name": "uSWID", "version": "0.4.0"}
+            {"vendor": "uSWID Authors", "name": "uSWID", "version": __version__}
         ]
         if metadata_authors:
             data_metadata_authors: List[Dict[str, str]] = []

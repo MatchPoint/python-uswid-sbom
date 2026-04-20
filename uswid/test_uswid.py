@@ -21,6 +21,7 @@ from lxml import etree as ET
 # allows us to run this from the project root
 sys.path.append(os.path.realpath("."))
 
+from . import __version__ as tool_version
 from .container import uSwidContainer
 from .errors import NotSupportedError
 from .link import uSwidLink, uSwidLinkRel
@@ -190,7 +191,7 @@ class TestSwidEntity(unittest.TestCase):
       {
         "vendor": "uSWID Authors",
         "name": "uSWID",
-        "version": "0.4.0"
+        "version": "@USWID_VERSION@"
       }
     ],
     "authors": [
@@ -283,7 +284,7 @@ class TestSwidEntity(unittest.TestCase):
       "dependsOn": "pkg:github/tianocore/edk2@202411#BaseLib"
     }
   ]
-}""",
+}""".replace("@USWID_VERSION@", tool_version),
         )
 
     def test_vcs_verfmt(self):
