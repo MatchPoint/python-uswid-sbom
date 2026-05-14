@@ -71,6 +71,7 @@ from .errors import NotSupportedError
 from .format_cyclonedx import uSwidFormatCycloneDX
 from .format_inf import uSwidFormatInf
 from .link import uSwidLink, uSwidLinkRel
+from .patch import uSwidPatch, uSwidPatchType
 from .purl import uSwidPurl
 
 _REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -325,6 +326,166 @@ def _build_per_inf_container(
     return inf_path, per_inf, None
 
 
+# ---------------------------------------------------------------------------
+# Submodule versioning and CPE helpers
+# ---------------------------------------------------------------------------
+
+# NVD CPE dictionary entries for known EDK2 submodules.
+# Keyed by the GitHub "owner/repo" fragment from the submodule URL.
+# Only packages with confirmed NVD entries are listed; others stay PURL-only.
+# Verified against NVD CPE dictionary May 2026.
+_SUBMODULE_CPE_MAP: Dict[str, Tuple[str, str]] = {
+    "openssl/openssl":  ("openssl",           "openssl"),
+    "ARMmbed/mbedtls":  ("arm",               "mbed_tls"),
+    "akheron/jansson":  ("jansson_project",   "jansson"),
+    "kkos/oniguruma":   ("oniguruma_project", "oniguruma"),
+    "google/brotli":    ("google",            "brotli"),
+    "DMTF/libspdm":     ("dmtf",             "libspdm"),
+}
+
+# Regex to extract the git-describe patch suffix: -N-gHASH at end of string.
+_GIT_DESCRIBE_SUFFIX_RE = re.compile(r"-(\d+)-g([0-9a-f]+)$")
+# Regex to strip a project-name suffix added by the downstream fork (e.g. +edk2).
+_PROJECT_SUFFIX_RE = re.compile(r"[+][a-zA-Z0-9_-]+$")
+# Bare commit hash (7-40 hex chars, no dots or dashes).
+_BARE_COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
+# CVE identifier pattern.
+_CVE_RE = re.compile(r"\bCVE-\d{4}-\d+\b", re.IGNORECASE)
+
+
+def _normalize_submodule_version(raw: str) -> Tuple[str, int, Optional[str], Optional[str]]:
+    """Normalize a raw ``git describe`` string into (clean_version, patch_count,
+    commit_sha, base_tag).
+
+    * ``clean_version`` — semantic version suitable for a CPE/NVD lookup
+      (``v``/``V`` and project-name prefixes stripped, ``+project`` suffixes
+      removed, git-describe commit suffix removed).
+    * ``patch_count`` — number of commits applied on top of the last tag.
+    * ``commit_sha``  — short commit hash when past-tag commits exist, or the
+      bare hash itself when no tag is present, else ``None``.
+    * ``base_tag``    — the raw tag string as it appears in the git repo (used
+      to scope a ``git log <base_tag>..HEAD`` CVE scan); ``None`` for bare
+      commits.
+
+    Examples::
+
+        "openssl-3.5.1"             → ("3.5.1",  0,   None,     "openssl-3.5.1")
+        "v3.6.5"                    → ("3.6.5",  0,   None,     "v3.6.5")
+        "v1.2.0-1-ge230f47"         → ("1.2.0",  1,   "e230f47","v1.2.0")
+        "release-1.11.0-238-g86a"   → ("1.11.0", 238, "86a",    "release-1.11.0")
+        "cmocka-1.1.5-23-g1cc9cde"  → ("1.1.5",  23,  "1cc9cde","cmocka-1.1.5")
+        "v1.1+edk2"                 → ("1.1",    0,   None,     "v1.1")
+        "V184"                      → ("184",    0,   None,     "V184")
+        "3.7.0"                     → ("3.7.0",  0,   None,     "3.7.0")
+        "83d4e1e"                   → ("0.0.0",  0,   "83d4e1e", None)
+    """
+    raw = raw.strip()
+
+    # Bare commit hash — no release baseline.
+    if _BARE_COMMIT_RE.match(raw):
+        return "0.0.0", 0, raw, None
+
+    # Step 1: peel off git-describe patch suffix (-N-gHASH).
+    patch_count = 0
+    commit_sha: Optional[str] = None
+    m = _GIT_DESCRIBE_SUFFIX_RE.search(raw)
+    if m:
+        patch_count = int(m.group(1))
+        commit_sha = m.group(2)
+        raw = raw[: m.start()]          # e.g. "v1.2.0" or "cmocka-1.1.5"
+
+    # Step 2: remove downstream project suffix (e.g. "+edk2").
+    raw = _PROJECT_SUFFIX_RE.sub("", raw)
+
+    # base_tag is what remains — the actual tag name in the git repo.
+    base_tag: Optional[str] = raw
+
+    # Step 3: extract the clean version number (first digit-led portion).
+    vm = re.search(r"(\d[\d.]*)", raw)
+    if not vm:
+        return "0.0.0", patch_count, commit_sha, base_tag
+
+    clean_version = vm.group(1).rstrip(".")
+    return clean_version, patch_count, commit_sha, base_tag
+
+
+def _scan_git_log_for_cves(
+    cwd: str, base_tag: str, vcs_url: str
+) -> List[uSwidPatch]:
+    """Scan git log from *base_tag* to HEAD for CVE mentions.
+
+    Returns a list of :class:`uSwidPatch` objects:
+
+    * One **summary** entry (type ``cherry-pick``) noting the total commit
+      count, always prepended so readers see the range at a glance.
+    * One **security** entry per commit that mentions a CVE in its subject
+      or body, carrying the CVE IDs in ``references``.
+
+    Commits are scanned using ``git log <base_tag>..HEAD`` with a separator
+    record format so multi-line bodies are handled without ambiguity.
+    """
+    _SEP = "---USWID_COMMIT_END---"
+    try:
+        raw_log = _run_git(
+            ["log", f"{base_tag}..HEAD", "--no-merges",
+             f"--format=%H%x09%s%n%b%n{_SEP}"],
+            cwd=cwd,
+        )
+    except subprocess.CalledProcessError:
+        return []
+
+    patches: List[uSwidPatch] = []
+    total_commits = 0
+    current_sha = current_subject = ""
+    current_body_lines: List[str] = []
+
+    def _flush() -> None:
+        nonlocal current_sha, current_subject, current_body_lines
+        if not current_sha:
+            return
+        full_text = current_subject + " " + " ".join(current_body_lines)
+        cves = sorted(set(_CVE_RE.findall(full_text)))
+        if cves:
+            commit_url = (
+                f"{vcs_url.rstrip('/')}/commit/{current_sha}" if vcs_url else None
+            )
+            patches.append(
+                uSwidPatch(
+                    type=uSwidPatchType.SECURITY,
+                    url=commit_url,
+                    description=current_subject[:200],
+                    references=cves,
+                )
+            )
+        current_sha = current_subject = ""
+        current_body_lines = []
+
+    for line in raw_log.splitlines():
+        if line == _SEP:
+            _flush()
+            continue
+        if "\t" in line and not current_sha:
+            # First line of a new commit record: "HASH\tSubject"
+            parts = line.split("\t", 1)
+            current_sha = parts[0]
+            current_subject = parts[1] if len(parts) > 1 else ""
+            total_commits += 1
+        else:
+            current_body_lines.append(line)
+    _flush()  # flush last record if separator was missing
+
+    # Prepend the summary entry.
+    if total_commits > 0:
+        patches.insert(
+            0,
+            uSwidPatch(
+                type=uSwidPatchType.CHERRY_PICK,
+                description=f"{total_commits} commit(s) applied since {base_tag}",
+            ),
+        )
+    return patches
+
+
 def _make_submodule_components(
     edk2_dir: str, parent: uSwidComponent
 ) -> List[uSwidComponent]:
@@ -351,14 +512,20 @@ def _make_submodule_components(
         except subprocess.CalledProcessError:
             continue
         try:
-            sub_version = _run_git(["describe", "--tags", "--always"], cwd=sub_dir)
+            raw_version = _run_git(["describe", "--tags", "--always"], cwd=sub_dir)
         except subprocess.CalledProcessError:
-            sub_version = sub_sha[:12]
+            raw_version = sub_sha[:12]
+
+        clean_version, patch_count, commit_sha, base_tag = (
+            _normalize_submodule_version(raw_version)
+        )
 
         # derive a stable purl-ish tag_id from the submodule URL when possible
         m = re.search(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)", url)
+        github_slug: Optional[str] = None
         if m:
-            tag_id = f"pkg:github/{m.group('owner')}/{m.group('repo')}@{sub_sha}"
+            github_slug = f"{m.group('owner')}/{m.group('repo')}"
+            tag_id = f"pkg:github/{github_slug}@{sub_sha}"
             supplier_name = m.group("owner")
         else:
             tag_id = f"pkg:edk2-submodule/{rel_path}@{sub_sha}"
@@ -367,11 +534,37 @@ def _make_submodule_components(
         comp = uSwidComponent()
         comp.tag_id = tag_id
         comp.software_name = os.path.basename(rel_path)
-        comp.software_version = sub_version
+        comp.software_version = clean_version
         comp.type = uSwidComponentType.LIBRARY
+
+        # Assign a CPE when this submodule has a known NVD entry.
+        if github_slug:
+            cpe_entry = _SUBMODULE_CPE_MAP.get(github_slug)
+            if cpe_entry:
+                cpe_vendor, cpe_product = cpe_entry
+                comp.cpe = (
+                    f"cpe:2.3:a:{cpe_vendor}:{cpe_product}"
+                    f":{clean_version}:*:*:*:*:*:*:*"
+                )
+
         comp.add_entity(
             uSwidEntity(name=supplier_name, roles=[uSwidEntityRole.SOFTWARE_CREATOR])
         )
+
+        # Pedigree: if commits were applied past the last tag, scan for CVEs.
+        if patch_count > 0 and base_tag and os.path.isdir(sub_dir):
+            vcs_url = url if url.startswith("http") else ""
+            for patch in _scan_git_log_for_cves(sub_dir, base_tag, vcs_url):
+                comp.add_patch(patch)
+        elif commit_sha and base_tag is None:
+            # Bare commit with no release baseline — record it as a single patch.
+            comp.add_patch(
+                uSwidPatch(
+                    type=uSwidPatchType.CHERRY_PICK,
+                    description=f"No release tag found; pinned at commit {commit_sha}",
+                )
+            )
+
         if url:
             comp.add_link(uSwidLink(rel=uSwidLinkRel.SEE_ALSO, href=url))
         parent.add_link(uSwidLink(rel=uSwidLinkRel.COMPONENT, href=comp.tag_id))
@@ -489,8 +682,10 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
                 inf_path, per_inf, err = fut.result()
                 if per_inf is None:
                     skip_count += 1
-                    if isinstance(err, FileNotFoundError):
-                        # tolerate missing submodule sources; report at the end
+                    if isinstance(err, (FileNotFoundError, NotSupportedError)):
+                        # tolerate missing submodule sources and .inf files that
+                        # lack a BASE_NAME (e.g. platform-specific stub .inf);
+                        # report at the end via the skip-rate assertion
                         continue
                     # any other error type indicates a code-level bug
                     self.fail(f"{inf_path}: unexpected error {err!r}")

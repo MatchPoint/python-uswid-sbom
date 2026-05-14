@@ -611,6 +611,33 @@ class TestSwidEntity(unittest.TestCase):
         self.assertEqual(ini_load_patch.description, patch.description)
         self.assertEqual(ini_load_patch.references, patch.references)
 
+    def test_normalize_submodule_version(self):
+        """Unit tests for _normalize_submodule_version (EDK2 submodule versioning)."""
+        from .test_edk2_integration import _normalize_submodule_version
+
+        cases = [
+            # (raw,                              clean,    patches, has_sha, has_tag)
+            ("openssl-3.5.1",                   "3.5.1",  0,       False,   True),
+            ("v3.6.5",                          "3.6.5",  0,       False,   True),
+            ("v2.13.1",                         "2.13.1", 0,       False,   True),
+            ("v6.9.10",                         "6.9.10", 0,       False,   True),
+            ("3.7.0",                           "3.7.0",  0,       False,   True),
+            ("V184",                            "184",    0,       False,   True),
+            ("v1.1+edk2",                       "1.1",    0,       False,   True),
+            ("v1.2.0-1-ge230f47",               "1.2.0",  1,       True,    True),
+            ("v1.6.1-3-gcfff805",               "1.6.1",  3,       True,    True),
+            ("release-1.11.0-238-g86add134",    "1.11.0", 238,     True,    True),
+            ("cmocka-1.1.5-23-g1cc9cde",        "1.1.5",  23,      True,    True),
+            ("83d4e1e",                         "0.0.0",  0,       True,    False),
+        ]
+        for raw, exp_ver, exp_patches, exp_sha, exp_tag in cases:
+            with self.subTest(raw=raw):
+                clean, patches, sha, tag = _normalize_submodule_version(raw)
+                self.assertEqual(clean, exp_ver, f"clean version mismatch for {raw!r}")
+                self.assertEqual(patches, exp_patches, f"patch count mismatch for {raw!r}")
+                self.assertEqual(sha is not None, exp_sha, f"sha presence mismatch for {raw!r}")
+                self.assertEqual(tag is not None, exp_tag, f"tag presence mismatch for {raw!r}")
+
     def test_component_purl(self):
         """Unit tests for uSwidComponent, PURL specific"""
 
