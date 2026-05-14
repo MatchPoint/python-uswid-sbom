@@ -1,0 +1,115 @@
+---
+description: USBT UEFI SBOM project context — always apply in this repo.
+alwaysApply: true
+---
+
+# USBT UEFI SBOM Project
+
+## Who and what
+
+The user is **Chair of the USBT working group (uefi.org)**, developing SBOM guidelines for the UEFI firmware supply chain. The objective of this repo (`python-uswid-sbom`) is to:
+
+1. Keep uSWID-generated SBOMs **compliant with the UEFI SBOM guidelines**.
+2. When the guidelines doc changes → **update the code and tests**.
+3. When the implementation changes → **update the guideline docs to match**.
+4. Use **EDK2** (open-source UEFI reference platform) as the primary test corpus.
+
+## Guidelines documents
+
+All live under `docs/uefi/` (gitignored — local-only, not committed).
+
+| File | Purpose |
+|------|---------|
+| `docs/uefi/UEFI SBOM Guidelines.docx` | Canonical Word draft (v1.0) — primary source |
+| `docs/uefi/guidelines.md` | Full markdown mirror of the Word doc — engineering source of truth for compliance |
+| `docs/uefi/conformance.md` | Living checklist: each Level-1 attribute mapped to code file/function with pass/fail status |
+| `docs/uefi/known_doc_issues.md` | 23 known drafting issues to feed back to USBT for v1.1 (19 original + 4 from EDK2 SBOM review) |
+
+Always read these files before proposing any compliance-related code or doc change.
+
+## Conformance status (as of May 2026)
+
+Unit tests pass for all 11 Level-1 attributes (both CycloneDX and SPDX). However, the **EDK2 integration SBOM review** revealed real-world gaps. See `docs/uefi/conformance.md` for full details.
+
+| Attribute | Unit test | EDK2 SBOM |
+|-----------|-----------|-----------|
+| Author Name (3.1.1.1) | ✅ | 🔄 no emails (git shortlog limitation) |
+| Timestamp (3.1.1.2) | ✅ | ✅ |
+| Primary Component (3.1.1.3) | ✅ | ✅ |
+| Type / Lifecycle (3.1.1.3 dup) | ✅ | ✅ `pre-build` array |
+| Component Name (3.1.2.1) | ✅ | ✅ |
+| Version String (3.1.5) | ✅ | 🔄 186/198 = generic `1.0` |
+| Supplier (3.1.2.2) | ✅ | ✅ 198/198 |
+| Cryptographic Hash (3.1.7) | ✅ | 🔄 0/198 in `hashes[]` (hash in `properties` only) |
+| Unique Identifier (3.1.8) | ✅ | ✅ CPE bom-ref on all |
+| Dependency Relationships (3.1.9) | ✅ | ✅ (+ self-ref bug on CmObjHelperLib) |
+| License (3.1.10) | ✅ | ✅ |
+| Copyright Holder (3.1.11) | ✅ | 🔄 0/198 including primary |
+
+## Key code files
+
+| File | Role |
+|------|------|
+| `uswid/format_cyclonedx.py` | CycloneDX writer/reader |
+| `uswid/format_spdx.py` | SPDX writer/reader |
+| `uswid/format_inf.py` | EDK2 `.inf` parser |
+| `uswid/component.py` | Core component model (incl. `is_primary`, `copyright` fields) |
+| `uswid/entity.py` | Entity model (incl. `email` field) |
+| `uswid/cli.py` | CLI (`--sbom-type`, `--lifecycle-phase`, `--primary` flags) |
+| `uswid/test_edk2_integration.py` | EDK2 end-to-end integration test (gated by `USWID_EDK2_INTEGRATION=1`) |
+| `uswid/test_uswid.py` | Unit + conformance tests |
+
+## EDK2 review artifact
+
+Most recent generated SBOM (from integration test against local EDK2 checkout):
+
+`tests/_edk2_cache/edk2-stable202602+196.g0fe6b755f2/edk2.cdx.json`
+
+## Primary engineering objective: CVE lookup via accurate CPEs
+
+The single most important practical outcome of this project is enabling **CVE vulnerability lookups against every SBOM component**. For this to work, each component's CPE must be:
+
+1. **Accurate vendor/product fields** — matching the NVD dictionary entry for that component.
+2. **Accurate version** — matching the exact upstream release version, not a generic placeholder like `1.0`.
+
+This requirement directly drives the work on:
+- `format_inf.py` — must extract real version strings from `.inf` files (not default `1.0`).
+- `test_edk2_integration.py` — EDK2-level version (`edk2-stable202602`) is correct for the parent; child modules need their own accurate versions.
+- `docs/uefi/guidelines.md` §3.1.5 and §3.1.8 — version and unique identifier requirements exist specifically to support CVE matching.
+
+**A CPE with `version = 1.0` (default) or `version = *` provides no CVE query value.** When reviewing SBOM output, always check CPE version fields for accuracy against NVD.
+
+## ⚠ DO NOT PUSH TO REMOTE
+
+The repository is **public** but the UEFI SBOM Guidelines document (`docs/uefi/UEFI SBOM Guidelines.docx`) is **private / not yet released**. Any commits that reference, mirror, or implement content from that document must **not be pushed to the remote** until the document is cleared for public release by the USBT working group.
+
+This includes:
+- This rule file (`.cursor/rules/usbt-sbom-guidelines.mdc`)
+- Any code changes that were made to achieve guideline compliance
+- Any test changes tied to guideline conformance
+
+When the document is cleared for release, remove this block and push normally.
+
+## Working process
+
+- Review EDK2-generated `edk2.cdx.json` first when evaluating compliance.
+- Update `docs/uefi/conformance.md` after any attribute implementation change.
+- File new drafting issues in `docs/uefi/known_doc_issues.md` as they are found.
+- Do not commit `docs/uefi/` files — they stay gitignored (local-only working copies).
+- This rule file (`.cursor/rules/usbt-sbom-guidelines.mdc`) is committed **locally only** — do not push to remote until the guidelines document is public.
+
+## Pending code work (from EDK2 SBOM review, May 2026)
+
+These gaps were found by comparing `tests/_edk2_cache/edk2-stable202602+196.g0fe6b755f2/edk2.cdx.json` against `docs/uefi/guidelines.md`. See `docs/uefi/conformance.md` §"EDK2 SBOM structural observations" for full details.
+
+**Priority 1 — CVE lookup enablement (accurate CPE versions):**
+- [ ] **Gap §3.1.5 [CRITICAL]:** 186/198 components have `version = "1.0"` — a generic INF default. Fix `format_inf.py` to extract real version from `.inf` `VERSION_STRING`; when no meaningful version exists, fall back to git commit SHA or populate `hashes[]` from the colloquial SHA-256. Without accurate versions, CPE-based CVE lookups are impossible.
+
+**Priority 2 — Other Level-1 gaps:**
+- [ ] **Gap §3.1.7:** Move/copy colloquial SHA-256 from `properties[].colloquialVersion` into `component.hashes[{"alg":"SHA-256","content":"..."}]`.
+- [ ] **Gap §3.1.11:** Set `copyright` on primary component in `test_edk2_integration.py`; parse copyright from `.inf` headers for child components in `format_inf.py`.
+
+**Priority 3 — Bugs and minor issues:**
+- [ ] **Bug:** Filter self-referential `dependsOn` entries (CmObjHelperLib lists itself). Fix in `format_inf.py` or `test_edk2_integration.py`.
+- [ ] **Minor:** Add `metadata.supplier` to the EDK2 parent component in `test_edk2_integration.py`.
+- [ ] **Minor:** Investigate `tools[].version = "0.0.0+unknown"` — `setuptools_scm` not resolving in test env.
