@@ -65,6 +65,41 @@ Most recent generated SBOM (from integration test against local EDK2 checkout):
 
 `tests/_edk2_cache/edk2-stable202602+196.g0fe6b755f2/edk2.cdx.json`
 
+## OSS component version rules (for CPE accuracy)
+
+When determining the `version` field for an OSS submodule component:
+
+1. **CPE dictionary first.** Use the version string exactly as it appears in the NVD CPE dictionary entry for that product. Strip any `v`/`V` prefix and project-name prefix (e.g., `openssl-3.5.1` → `3.5.1`) to match NVD format.
+
+2. **No CPE dictionary entry.** Consult the supplier's git tags or release page to find the canonical version string. Use the clean semantic version without tag prefixes.
+
+3. **Commit-based version (e.g., `v1.2.0-3-gabcdef`).** The SBOM version MUST be the **last official release prior to that commit** (e.g., `1.2.0`). Each commit after the release is recorded as a patch in `pedigree.patches[]` (CycloneDX) or equivalent. Never use a raw git describe string as the version — it will not match any NVD entry.
+
+4. **Bare commit hash with no release ancestor (e.g., `83d4e1e`).** Record as `0.0.0` and note the commit SHA in `pedigree` or a `property`. Flag as "no release baseline" in the SBOM.
+
+5. **Version with project-specific suffix (e.g., `v1.1+edk2`).** Strip the suffix; use the upstream release version only (`1.1`).
+
+These rules apply in `uswid/test_edk2_integration.py` (submodule component construction) and `uswid/format_inf.py` (INF version extraction).
+
+### Per-package CPE and version table (EDK2 submodules, verified May 2026)
+
+| Submodule | Raw git-describe version | Clean version | NVD CPE product | Exact version in NVD? | Correct CPE |
+|-----------|--------------------------|---------------|-----------------|----------------------|-------------|
+| openssl | `openssl-3.5.1` | `3.5.1` | `openssl:openssl` ✅ | ✅ 3.5.1 confirmed | `cpe:2.3:a:openssl:openssl:3.5.1:*:*:*:*:*:*:*` |
+| mbedtls | `v3.6.5` | `3.6.5` | `arm:mbed_tls` ✅ | ✅ 3.6.5 confirmed | `cpe:2.3:a:arm:mbed_tls:3.6.5:*:*:*:*:*:*:*` |
+| jansson | `v2.13.1` | `2.13.1` | `jansson_project:jansson` ✅ | ✅ 2.13.1 confirmed | `cpe:2.3:a:jansson_project:jansson:2.13.1:*:*:*:*:*:*:*` |
+| oniguruma | `v6.9.10` | `6.9.10` | `oniguruma_project:oniguruma` ✅ | ⚠️ NVD max is 6.9.6 | `cpe:2.3:a:oniguruma_project:oniguruma:6.9.10:*:*:*:*:*:*:*` (add anyway) |
+| brotli | `v1.2.0-1-ge230f47` | `1.2.0` (1 commit post-tag) | `google:brotli` ✅ | ⚠️ NVD max is 1.0.9 | `cpe:2.3:a:google:brotli:1.2.0:*:*:*:*:*:*:*` (add anyway) |
+| libspdm | `3.7.0` | `3.7.0` | `dmtf:libspdm` ✅ | ⚠️ NVD max is 2.3.3 | `cpe:2.3:a:dmtf:libspdm:3.7.0:*:*:*:*:*:*:*` (add anyway) |
+| cmocka | `cmocka-1.1.5-23-g1cc9cde` | `1.1.5` (23 commits post-tag) | ❌ not in NVD | — | PURL only |
+| libfdt | `v1.6.1-3-gcfff805` | `1.6.1` (3 commits post-tag) | ❌ not in NVD | — | PURL only |
+| googletest | `release-1.11.0-238-g86add134` | `1.11.0` (238 commits post-tag) | ❌ not in NVD | — | PURL only |
+| mipisyst | `v1.1+edk2` | `1.1` (strip edk2 suffix) | ❌ not in NVD | — | PURL only |
+| TPM | `V184` | `184` (strip V prefix) | ❌ not in NVD | — | PURL only |
+| subhook | `83d4e1e` | `0.0.0` (bare commit, no tag) | ❌ not in NVD | — | PURL only |
+
+**Immediate CVE value:** openssl, mbedtls, and jansson have both a confirmed NVD CPE entry and the exact version present in the dictionary — these three should be the first components to have CPEs added. Oniguruma, brotli, and libspdm have NVD product entries but their specific versions are ahead of what NVD currently tracks.
+
 ## Primary engineering objective: CVE lookup via accurate CPEs
 
 The single most important practical outcome of this project is enabling **CVE vulnerability lookups against every SBOM component**. For this to work, each component's CPE must be:
@@ -102,8 +137,23 @@ When the document is cleared for release, remove this block and push normally.
 
 These gaps were found by comparing `tests/_edk2_cache/edk2-stable202602+196.g0fe6b755f2/edk2.cdx.json` against `docs/uefi/guidelines.md`. See `docs/uefi/conformance.md` §"EDK2 SBOM structural observations" for full details.
 
-**Priority 1 — CVE lookup enablement (accurate CPE versions):**
-- [ ] **Gap §3.1.5 [CRITICAL]:** 186/198 components have `version = "1.0"` — a generic INF default. Fix `format_inf.py` to extract real version from `.inf` `VERSION_STRING`; when no meaningful version exists, fall back to git commit SHA or populate `hashes[]` from the colloquial SHA-256. Without accurate versions, CPE-based CVE lookups are impossible.
+**Priority 1 — CVE lookup enablement (accurate CPE versions for submodules):**
+
+Work package-by-package in this order (highest CVE value first):
+- [ ] **openssl** — add `cpe:2.3:a:openssl:openssl:3.5.1:*:*:*:*:*:*:*`, set `version = "3.5.1"` (strip `openssl-` prefix)
+- [ ] **mbedtls** — add `cpe:2.3:a:arm:mbed_tls:3.6.5:*:*:*:*:*:*:*`, set `version = "3.6.5"` (strip `v` prefix)
+- [ ] **jansson** — add `cpe:2.3:a:jansson_project:jansson:2.13.1:*:*:*:*:*:*:*`, set `version = "2.13.1"`
+- [ ] **oniguruma** — add `cpe:2.3:a:oniguruma_project:oniguruma:6.9.10:*:*:*:*:*:*:*`, set `version = "6.9.10"` (NVD lags at 6.9.6; add CPE anyway)
+- [ ] **brotli** — add `cpe:2.3:a:google:brotli:1.2.0:*:*:*:*:*:*:*`, set `version = "1.2.0"`, add pedigree patch for commit e230f47 (NVD lags at 1.0.9)
+- [ ] **libspdm** — add `cpe:2.3:a:dmtf:libspdm:3.7.0:*:*:*:*:*:*:*` (version `3.7.0` is already clean; NVD lags at 2.3.3)
+- [ ] **cmocka** — no NVD CPE; set `version = "1.1.5"` (strip prefix), add pedigree patch (23 commits)
+- [ ] **libfdt** — no NVD CPE; set `version = "1.6.1"` (strip `v`), add pedigree patch (3 commits)
+- [ ] **googletest** — no NVD CPE; set `version = "1.11.0"` (strip prefix), add pedigree patch (238 commits)
+- [ ] **mipisyst** — no NVD CPE; set `version = "1.1"` (strip `+edk2` suffix)
+- [ ] **TPM** — no NVD CPE; set `version = "184"` (strip `V` prefix)
+- [ ] **subhook** — no NVD CPE; bare commit `83d4e1e`, no release tag → set `version = "0.0.0"`, note commit in pedigree
+
+All changes are in `uswid/test_edk2_integration.py` submodule component construction block.
 
 **Priority 2 — Other Level-1 gaps:**
 - [ ] **Gap §3.1.7:** Move/copy colloquial SHA-256 from `properties[].colloquialVersion` into `component.hashes[{"alg":"SHA-256","content":"..."}]`.
