@@ -5,6 +5,35 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**0.7.0** (TBD — UEFI SBOM Guidelines compliance, EDK2 integration)
+
+ - Add ``uSwidComponent.is_primary`` field to designate the SBOM Primary Component per UEFI SBOM Guidelines §3.1.1.3; CycloneDX emits it as ``metadata.component``, SPDX emits a single ``Relationship: SPDXRef-DOCUMENT DESCRIBES`` (HP Development Company)
+ - Add ``uSwidComponent.copyright`` field for copyright notices per UEFI SBOM Guidelines §3.1.11; CycloneDX emits ``component.copyright``, SPDX emits ``PackageCopyrightText`` (defaults to ``NOASSERTION``) (HP Development Company)
+ - Add ``uSwidEntity.email`` field for contact email per UEFI SBOM Guidelines §3.1.1.1; CycloneDX emits ``metadata.authors[].email``, SPDX emits ``Person|Organization: Name <email>`` (HP Development Company)
+ - CycloneDX: emit ``metadata.authors[]`` with email when ``uSwidEntity.email`` is set (§3.1.1.1) (HP Development Company)
+ - CycloneDX: emit ``metadata.timestamp`` in UTC with ``Z`` suffix per ISO-8601 (§3.1.1.2) (HP Development Company)
+ - CycloneDX: resolve Primary Component via ``is_primary`` flag, falling back to unique firmware-type component then first component; emit as ``metadata.component`` and exclude from ``components[]`` (§3.1.1.3) (HP Development Company)
+ - CycloneDX: derive ``metadata.lifecycles[{"phase": "..."}]`` from SBOM type — ``source``→``pre-build``, ``build``→``build``, ``binary``→``post-build`` (§3.1.1.3 Type) (HP Development Company)
+ - CycloneDX: prefer CPE as ``bom-ref`` when ``component.cpe`` is set; resolve ``dependencies[].dependsOn`` refs through an internal ``tag_id_to_bom_ref`` map so CPE-based bom-refs are consistent throughout (§3.1.8) (HP Development Company)
+ - CycloneDX: emit ``dependencies[].dependsOn`` as a JSON array (was emitted as a string in some code paths, violating the CycloneDX 1.6 schema) (§3.1.9) (HP Development Company)
+ - SPDX: emit ``Creator: Person|Organization: Name <email>`` when email is available (§3.1.1.1) (HP Development Company)
+ - SPDX: emit ``Created:`` timestamp in UTC ISO-8601 with ``Z`` suffix (§3.1.1.2) (HP Development Company)
+ - SPDX: emit single ``Relationship: SPDXRef-DOCUMENT DESCRIBES <primary>`` using the same Primary Component resolution logic as CycloneDX (§3.1.1.3) (HP Development Company)
+ - SPDX: use ``software_name`` (not ``product``) as ``PackageName`` for consistency with CycloneDX ``component.name`` (§3.1.2.1) (HP Development Company)
+ - SPDX: map ``SOFTWARE_CREATOR`` entity role to ``PackageSupplier`` and ``LICENSOR`` to ``PackageOriginator`` to preserve upstream heritage (§3.1.2.2) (HP Development Company)
+ - SPDX: emit ``filesAnalyzed: false`` on every package so per-package ``PackageChecksum`` is legal without ``PackageVerificationCode`` (§3.1.7) (HP Development Company)
+ - SPDX: sanitize ``SPDXID`` by replacing ``:`` ``/`` ``#`` ``@`` ``+`` with ``-``; preserve originals in ``externalRefs`` as ``purl`` / ``cpe23Type`` (§3.1.8) (HP Development Company)
+ - SPDX: emit ``Relationship: SPDXRef-x CONTAINS SPDXRef-y`` for ``uSwidLinkRel.COMPONENT`` links (§3.1.9) (HP Development Company)
+ - SPDX: emit both ``PackageLicenseConcluded`` and ``PackageLicenseDeclared`` (defaulting to ``NOASSERTION``) (§3.1.10) (HP Development Company)
+ - Add CLI ``--sbom-type {source,build,binary}``: maps to CycloneDX ``metadata.lifecycles[].phase`` and annotates SPDX ``creationInfo.comment`` (§3.1.1.3) (HP Development Company)
+ - Add CLI ``--lifecycle-phase``: advanced override for CycloneDX ``metadata.lifecycles[].phase``; takes precedence over ``--sbom-type`` (HP Development Company)
+ - Add CLI ``--primary <tag_id|CPE|PURL>``: marks the matching component as the SBOM Primary Component; matched against ``tag_id``, ``cpe``, and ``purl`` string (HP Development Company)
+ - Add EDK2 integration test (``uswid/test_edk2_integration.py``) mirroring the SBOM4EDK2 pipeline: parses EDK2 ``.inf`` modules into CycloneDX components, materialises ``.gitmodules`` as submodule components, merges into a single ``edk2.cdx.json``, and validates output against UEFI SBOM Guidelines CISA Level 1; supports light mode (subset of packages, no submodule sources) and full mode (all packages, recurse submodules); gated by ``USWID_EDK2_INTEGRATION=1`` (HP Development Company)
+ - EDK2 integration: add ``_normalize_submodule_version()`` to convert raw ``git describe`` output into a clean semantic version suitable for CPE/NVD lookup — strips ``v``/``V`` and project-name prefixes (e.g. ``openssl-``, ``cmocka-``), downstream suffixes (e.g. ``+edk2``), and git-describe patch suffixes (``-N-gHASH``); returns base version, commit count, commit SHA, and base tag for CVE scanning (HP Development Company)
+ - EDK2 integration: add ``_scan_git_log_for_cves()`` to scan ``git log <tag>..HEAD`` for CVE IDs (``CVE-YYYY-NNNNN``) in commit subjects and bodies; emits ``uSwidPatch`` entries of type ``security`` carrying the CVE IDs in ``resolves.references[]`` and a link to the commit URL, plus a summary entry noting total commit count (HP Development Company)
+ - EDK2 integration: add ``_SUBMODULE_CPE_MAP`` — NVD-verified CPE vendor/product mappings for the six EDK2 submodules with confirmed NVD dictionary entries (openssl, mbedtls, jansson, oniguruma, brotli, libspdm); submodules without NVD entries remain PURL-only (HP Development Company)
+ - Add ``test_normalize_submodule_version`` unit test covering all twelve EDK2 git-describe version patterns (HP Development Company)
+
 **0.6.0** (2025-03-16)
 
  - Add a workaround for a regression in cbor2 5.8.0 (Richard Hughes)
