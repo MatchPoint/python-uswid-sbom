@@ -55,12 +55,17 @@ class uSwidEntity:
         name: Optional[str] = None,
         regid: Optional[str] = None,
         roles: Optional[List[uSwidEntityRole]] = None,
+        email: Optional[str] = None,
     ):
         """Initializes uSwidEntity"""
         self.name: Optional[str] = name
         """Name"""
         self.regid: Optional[str] = regid
         """Registration ID, e.g. com.intel"""
+        self.email: Optional[str] = email
+        """Optional contact email address (UEFI SBOM Guidelines §3.1.1.1, §3.1.2.2).
+        Surfaces as CycloneDX ``authors[].email`` / ``supplier.contact[].email`` and
+        SPDX ``Creator: Person|Organization: Name <email>``."""
         self.roles: List[uSwidEntityRole] = []
         """Role of the entity, e.g. ``uSwidEntityRole.MAINTAINER``"""
         if roles:
@@ -105,6 +110,8 @@ class uSwidEntity:
             attrs.append(f'regid="{self.regid}"')
         if self.name:
             attrs.append(f'name="{self.name}"')
+        if self.email:
+            attrs.append(f'email="{self.email}"')
         if self.roles:
             attrs.append(f'roles=[{",".join([role.name for role in self.roles])}]')
         return f'uSwidEntity({",".join(attrs)})'

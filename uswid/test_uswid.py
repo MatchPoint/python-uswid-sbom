@@ -203,16 +203,14 @@ class TestSwidEntity(unittest.TestCase):
       {
         "phase": "pre-build"
       }
-    ]
-  },
-  "components": [
-    {
+    ],
+    "component": {
       "type": "firmware",
       "cpe": "cpe:2.3:a:tianocore:edk2:202411:*:*:*:*:*:*:*",
       "name": "EDK II",
       "version": "edk2-stable202411-105-gd55d4e22f4",
       "description": "A cross-platform firmware development environment for UEFI and PI specifications",
-      "bom-ref": "pkg:github/tianocore/edk2@202411",
+      "bom-ref": "cpe:2.3:a:tianocore:edk2:202411:*:*:*:*:*:*:*",
       "externalReferences": [
         {
           "type": "vcs",
@@ -235,7 +233,9 @@ class TestSwidEntity(unittest.TestCase):
           "name": "EDK II authors"
         }
       ]
-    },
+    }
+  },
+  "components": [
     {
       "type": "application",
       "group": "7c04a583-9e3e-4f1c-ad65-e05268d0b4d1",
@@ -243,7 +243,7 @@ class TestSwidEntity(unittest.TestCase):
       "name": "Shell",
       "version": "1.0",
       "description": "This is the shell application",
-      "bom-ref": "pkg:github/tianocore/edk2@202411#Shell",
+      "bom-ref": "cpe:2.3:a:tianocore:edk2:202411:*:*:*:*:*:*:Shell",
       "externalReferences": [
         {
           "type": "vcs",
@@ -276,12 +276,16 @@ class TestSwidEntity(unittest.TestCase):
   ],
   "dependencies": [
     {
-      "ref": "pkg:github/tianocore/edk2@202411",
-      "dependsOn": "pkg:github/tianocore/edk2@202411#Shell"
+      "ref": "cpe:2.3:a:tianocore:edk2:202411:*:*:*:*:*:*:*",
+      "dependsOn": [
+        "cpe:2.3:a:tianocore:edk2:202411:*:*:*:*:*:*:Shell"
+      ]
     },
     {
-      "ref": "pkg:github/tianocore/edk2@202411#Shell",
-      "dependsOn": "pkg:github/tianocore/edk2@202411#BaseLib"
+      "ref": "cpe:2.3:a:tianocore:edk2:202411:*:*:*:*:*:*:Shell",
+      "dependsOn": [
+        "pkg:github/tianocore/edk2@202411#BaseLib"
+      ]
     }
   ]
 }""".replace("@USWID_VERSION@", tool_version),
@@ -765,11 +769,13 @@ rel = see-also
         assert "22905301d08e69473393d94c3e787e4bf0453268" in tmp
         assert "manufacturer" in tmp
 
-        # SPDX export
+        # SPDX export. Per UEFI SBOM Guidelines §3.1.2.2 the SPDX `supplier` field is
+        # sourced from the SOFTWARE_CREATOR role; this fixture has only a LICENSOR
+        # (Richard Hughes), so the SPDX writer emits `originator` for him instead.
         tmp = uSwidFormatSpdx().save(uSwidContainer([component])).decode()
         assert "SPDX" in tmp
         assert "uSWID" in tmp
-        assert "supplier" in tmp
+        assert "originator" in tmp
 
     def test_cyclonedx_metadata_component_no_duplicate(self):
         """CycloneDX metadata.component should not duplicate components list"""
@@ -929,7 +935,9 @@ rel = see-also
             {l.spdx_id for l in comp.links if l.rel == uSwidLinkRel.LICENSE}
         )
         self.assertEqual(lic_ids, ["BSD-2-Clause"])
-        # entity roles
+        # entity roles. Per UEFI SBOM Guidelines §3.1.2.2 the SPDX `supplier` field maps
+        # to SOFTWARE_CREATOR (symmetric with CycloneDX) and `originator` maps to LICENSOR
+        # (upstream / heritage origin).
         licensor_names = [
             e.name for e in comp.entities if uSwidEntityRole.LICENSOR in e.roles
         ]
@@ -939,8 +947,8 @@ rel = see-also
         tag_creator_names = [
             e.name for e in comp.entities if uSwidEntityRole.TAG_CREATOR in e.roles
         ]
-        self.assertEqual(licensor_names, ["SupplyCorp"])
-        self.assertEqual(creator_names, ["OriginCorp"])
+        self.assertEqual(licensor_names, ["OriginCorp"])
+        self.assertEqual(creator_names, ["SupplyCorp"])
         self.assertEqual(tag_creator_names, ["TagCo"])
 
     def test_spdx_multiple_packages_with_dep(self):
@@ -1035,6 +1043,335 @@ rel = see-also
         self.assertIsNotNone(
             merged.get_by_id("22222222-2222-2222-2222-222222222222:dupPkg")
         )
+
+
+class TestUefiSbomGuidelinesConformance(unittest.TestCase):
+    """Conformance tests for the UEFI SBOM Guidelines (CISA Level 1).
+
+    Each test method pins one row of `docs/uefi/conformance.md`. The fixture
+    used by the end-to-end test is the section 3.1.8 example pair
+    (EDK II as Primary Component + OpenSSL as a contained component).
+    """
+
+    maxDiff = None
+
+    def _build_edk2_openssl_container(self) -> uSwidContainer:
+        """Build the UEFI SBOM Guidelines §3.1.8 example container in memory.
+
+        Primary component: EDK II (firmware), Tianocore supplier, BSD-2-Clause.
+        Contained component: OpenSSL (library), OpenSSL Project supplier, Apache-2.0,
+        linked from EDK II via uSwidLinkRel.COMPONENT to exercise dependency emission.
+        """
+        edk2 = uSwidComponent()
+        edk2.tag_id = "pkg:github/tianocore/edk2@stable202411"
+        edk2.cpe = "cpe:2.3:a:tianocore:edk2:stable202411:*:*:*:*:*:*:*"
+        edk2.software_name = "EDK II"
+        edk2.software_version = "stable202411"
+        edk2.summary = "EDK II UEFI Firmware Development Environment"
+        from .component import uSwidComponentType
+
+        edk2.type = uSwidComponentType.FIRMWARE
+        edk2.is_primary = True
+        edk2.copyright = "Copyright (c) 2024 Tianocore."
+        edk2.add_entity(
+            uSwidEntity(
+                name="Tianocore",
+                email="contact@tianocore.org",
+                roles=[uSwidEntityRole.SOFTWARE_CREATOR],
+            )
+        )
+        edk2.add_entity(
+            uSwidEntity(
+                name="Tianocore Maintainers",
+                email="devel@edk2.groups.io",
+                roles=[uSwidEntityRole.TAG_CREATOR],
+            )
+        )
+        edk2.add_link(
+            uSwidLink(
+                rel=uSwidLinkRel.LICENSE,
+                href="https://spdx.org/licenses/BSD-2-Clause.html",
+                spdx_id="BSD-2-Clause",
+            )
+        )
+
+        openssl = uSwidComponent()
+        openssl.tag_id = "pkg:github/openssl/openssl@3.0.15"
+        openssl.cpe = "cpe:2.3:a:openssl:openssl:3.0.15:*:*:*:*:*:*:*"
+        openssl.software_name = "OpenSSL"
+        openssl.software_version = "3.0.15"
+        openssl.summary = "Cryptography and SSL/TLS library used by EDK II"
+        openssl.copyright = "Copyright (c) 1998-2024 The OpenSSL Project Authors"
+        openssl.add_entity(
+            uSwidEntity(
+                name="OpenSSL Project",
+                email="osslsec@openssl.org",
+                roles=[uSwidEntityRole.SOFTWARE_CREATOR],
+            )
+        )
+        openssl.add_link(
+            uSwidLink(
+                rel=uSwidLinkRel.LICENSE,
+                href="https://spdx.org/licenses/Apache-2.0.html",
+                spdx_id="Apache-2.0",
+            )
+        )
+        edk2.add_link(
+            uSwidLink(
+                rel=uSwidLinkRel.COMPONENT,
+                href=openssl.tag_id,
+            )
+        )
+
+        return uSwidContainer([edk2, openssl])
+
+    # ----- CycloneDX -----
+
+    def test_cdx_dependencies_use_dependsOn_array(self):
+        """UEFI §3.1.9 / CycloneDX 1.6: dependencies[*].dependsOn must be an array."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatCycloneDX().save(container))
+        self.assertIn("dependencies", data)
+        self.assertTrue(data["dependencies"])
+        for dep in data["dependencies"]:
+            self.assertIn("ref", dep)
+            self.assertIn("dependsOn", dep)
+            self.assertIsInstance(dep["dependsOn"], list)
+            for ref in dep["dependsOn"]:
+                self.assertIsInstance(ref, str)
+                self.assertTrue(ref)
+
+    def test_cdx_primary_component_in_metadata_not_components_array(self):
+        """UEFI §3.1.1.3: the Primary Component lives in metadata.component only."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatCycloneDX().save(container))
+        self.assertIn("component", data["metadata"])
+        primary = data["metadata"]["component"]
+        self.assertEqual(primary["name"], "EDK II")
+        component_names = [c.get("name") for c in data.get("components", [])]
+        self.assertNotIn("EDK II", component_names)
+        self.assertIn("OpenSSL", component_names)
+
+    def test_cdx_timestamp_ends_with_Z(self):
+        """UEFI §3.1.1.2: metadata.timestamp must be ISO-8601 UTC with Z suffix."""
+        import re as _re
+
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatCycloneDX().save(container))
+        ts = data["metadata"]["timestamp"]
+        self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertTrue(ts.endswith("Z"))
+        # extra: must be parseable as UTC
+        self.assertEqual(_re.findall(r"[Z+\-]", ts)[-1], "Z")
+
+    def test_cdx_supplier_contact_email_emitted(self):
+        """UEFI §3.1.2.2: supplier email surfaces via supplier.contact[].email."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatCycloneDX().save(container))
+        primary = data["metadata"]["component"]
+        self.assertEqual(primary["supplier"]["name"], "Tianocore")
+        self.assertEqual(
+            primary["supplier"]["contact"][0]["email"], "contact@tianocore.org"
+        )
+        # author email also surfaces at metadata.authors[].email
+        authors = data["metadata"]["authors"]
+        self.assertEqual(authors[0]["name"], "Tianocore Maintainers")
+        self.assertEqual(authors[0]["email"], "devel@edk2.groups.io")
+
+    def test_cdx_copyright_emitted_and_round_trips(self):
+        """UEFI §3.1.11: component.copyright is emitted and reloads identical."""
+        container = self._build_edk2_openssl_container()
+        fmt = uSwidFormatCycloneDX()
+        blob = fmt.save(container)
+        data = json.loads(blob)
+        self.assertEqual(
+            data["metadata"]["component"]["copyright"],
+            "Copyright (c) 2024 Tianocore.",
+        )
+        # round-trip
+        reloaded = fmt.load(blob)
+        primary = next(c for c in reloaded if c.is_primary)
+        self.assertEqual(primary.copyright, "Copyright (c) 2024 Tianocore.")
+
+    def test_cdx_lifecycle_phase_honors_sbom_type(self):
+        """UEFI §3.1.1.3 Type: --sbom-type drives metadata.lifecycles[0].phase."""
+        container = self._build_edk2_openssl_container()
+        for sbom_type, expected_phase in (
+            ("source", "pre-build"),
+            ("build", "build"),
+            ("binary", "post-build"),
+        ):
+            fmt = uSwidFormatCycloneDX()
+            fmt.sbom_type = sbom_type
+            data = json.loads(fmt.save(container))
+            self.assertEqual(
+                data["metadata"]["lifecycles"][0]["phase"],
+                expected_phase,
+                f"sbom_type={sbom_type} should map to phase={expected_phase}",
+            )
+        # explicit --lifecycle-phase overrides --sbom-type
+        fmt = uSwidFormatCycloneDX()
+        fmt.sbom_type = "source"
+        fmt.lifecycle_phase = "post-build"
+        data = json.loads(fmt.save(container))
+        self.assertEqual(data["metadata"]["lifecycles"][0]["phase"], "post-build")
+
+    def test_cdx_bom_ref_prefers_cpe(self):
+        """UEFI §3.1.8: when a CPE is available, the bom-ref is the CPE."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatCycloneDX().save(container))
+        self.assertEqual(
+            data["metadata"]["component"]["bom-ref"],
+            "cpe:2.3:a:tianocore:edk2:stable202411:*:*:*:*:*:*:*",
+        )
+        openssl_dict = next(c for c in data["components"] if c["name"] == "OpenSSL")
+        self.assertEqual(
+            openssl_dict["bom-ref"], "cpe:2.3:a:openssl:openssl:3.0.15:*:*:*:*:*:*:*"
+        )
+        # dep refs use the same CPE-form so consumers can correlate consistently
+        primary_ref = data["metadata"]["component"]["bom-ref"]
+        primary_deps = next(
+            d for d in data["dependencies"] if d["ref"] == primary_ref
+        )
+        self.assertIn(
+            "cpe:2.3:a:openssl:openssl:3.0.15:*:*:*:*:*:*:*",
+            primary_deps["dependsOn"],
+        )
+
+    # ----- SPDX -----
+
+    def test_spdx_package_name_is_software_name(self):
+        """UEFI §3.1.2.1: PackageName must be the supplier-defined software_name."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatSpdx().save(container))
+        names = sorted(pkg["name"] for pkg in data["packages"])
+        self.assertEqual(names, ["EDK II", "OpenSSL"])
+
+    def test_spdx_relationships_describes_and_contains(self):
+        """UEFI §3.1.9: SPDX relationships[] emits DESCRIBES + CONTAINS edges."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatSpdx().save(container))
+        rels = data.get("relationships", [])
+        rel_types = sorted(r["relationshipType"] for r in rels)
+        self.assertEqual(rel_types, ["CONTAINS", "DESCRIBES"])
+        describes = next(r for r in rels if r["relationshipType"] == "DESCRIBES")
+        self.assertEqual(describes["spdxElementId"], "SPDXRef-DOCUMENT")
+        # the DESCRIBES target must be a real package in the document
+        package_spdxids = {pkg["SPDXID"] for pkg in data["packages"]}
+        self.assertIn(describes["relatedSpdxElement"], package_spdxids)
+        # the CONTAINS source is the primary; the target is OpenSSL.
+        contains = next(r for r in rels if r["relationshipType"] == "CONTAINS")
+        self.assertEqual(contains["spdxElementId"], describes["relatedSpdxElement"])
+        self.assertIn(contains["relatedSpdxElement"], package_spdxids)
+
+    def test_spdx_license_concluded_and_copyright_text(self):
+        """UEFI §3.1.10 / §3.1.11: emit LicenseConcluded and PackageCopyrightText."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatSpdx().save(container))
+        for pkg in data["packages"]:
+            self.assertIn("licenseConcluded", pkg)
+            self.assertNotEqual(pkg["licenseConcluded"], "")
+            self.assertIn("copyrightText", pkg)
+        edk2_pkg = next(p for p in data["packages"] if p["name"] == "EDK II")
+        self.assertEqual(edk2_pkg["licenseConcluded"], "BSD-2-Clause")
+        self.assertEqual(edk2_pkg["licenseDeclared"], "BSD-2-Clause")
+        self.assertEqual(edk2_pkg["copyrightText"], "Copyright (c) 2024 Tianocore.")
+
+    def test_spdx_created_timestamp_is_tz_aware_Z(self):
+        """UEFI §3.1.1.2: SPDX creationInfo.created uses UTC with Z."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatSpdx().save(container))
+        ts = data["creationInfo"]["created"]
+        self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_spdx_supplier_symmetric_with_cdx(self):
+        """The same container produces consistent supplier names in CDX and SPDX."""
+        container = self._build_edk2_openssl_container()
+        cdx = json.loads(uSwidFormatCycloneDX().save(container))
+        spdx = json.loads(uSwidFormatSpdx().save(container))
+        cdx_edk2_supplier = cdx["metadata"]["component"]["supplier"]["name"]
+        spdx_edk2_pkg = next(p for p in spdx["packages"] if p["name"] == "EDK II")
+        # SPDX supplier is rendered "Organization: <name> <email>"
+        self.assertTrue(
+            spdx_edk2_pkg["supplier"].startswith(f"Organization: {cdx_edk2_supplier}")
+            or spdx_edk2_pkg["supplier"].startswith(f"Person: {cdx_edk2_supplier}")
+        )
+        self.assertIn("contact@tianocore.org", spdx_edk2_pkg["supplier"])
+
+    def test_spdx_spdxid_sanitized(self):
+        """UEFI §3.1.8: SPDXID strips disallowed chars from PURL/CPE tag_ids."""
+        container = self._build_edk2_openssl_container()
+        data = json.loads(uSwidFormatSpdx().save(container))
+        for pkg in data["packages"]:
+            spdxid = pkg["SPDXID"]
+            self.assertTrue(spdxid.startswith("SPDXRef-"))
+            self.assertRegex(spdxid, r"^SPDXRef-[A-Za-z0-9][A-Za-z0-9.-]*$")
+        # purl/cpe still recoverable via externalRefs
+        primary_pkg = next(p for p in data["packages"] if p["name"] == "EDK II")
+        ref_locators = {r["referenceLocator"] for r in primary_pkg["externalRefs"]}
+        self.assertIn("pkg:github/tianocore/edk2@stable202411", ref_locators)
+        self.assertIn(
+            "cpe:2.3:a:tianocore:edk2:stable202411:*:*:*:*:*:*:*", ref_locators
+        )
+
+    def test_spdx_round_trip_preserves_primary(self):
+        """Round-trip: loading the saved SPDX recovers `is_primary` on EDK II."""
+        container = self._build_edk2_openssl_container()
+        fmt = uSwidFormatSpdx()
+        blob = fmt.save(container)
+        reloaded = fmt.load(blob)
+        primaries = [c for c in reloaded if c.is_primary]
+        self.assertEqual(len(primaries), 1)
+        self.assertEqual(primaries[0].software_name, "EDK II")
+
+    # ----- end-to-end §3.1.8 sample, structural + round-trip -----
+
+    def test_section_3_1_8_end_to_end_cdx_and_spdx(self):
+        """Section 3.1.8 EDK II + OpenSSL sample parses, validates structurally,
+        and round-trips both CycloneDX and SPDX without losing identity."""
+        container = self._build_edk2_openssl_container()
+
+        # CDX
+        cdx_fmt = uSwidFormatCycloneDX()
+        cdx_blob = cdx_fmt.save(container)
+        cdx = json.loads(cdx_blob)
+        self.assertEqual(cdx["bomFormat"], "CycloneDX")
+        self.assertEqual(cdx["specVersion"], "1.6")
+        self.assertIn("metadata", cdx)
+        self.assertIn("component", cdx["metadata"])
+        self.assertEqual(cdx["metadata"]["component"]["name"], "EDK II")
+        # exactly one non-primary component (OpenSSL)
+        self.assertEqual(len(cdx["components"]), 1)
+        self.assertEqual(cdx["components"][0]["name"], "OpenSSL")
+        # dep array structure
+        self.assertTrue(cdx["dependencies"])
+        for dep in cdx["dependencies"]:
+            self.assertIsInstance(dep["dependsOn"], list)
+
+        # CDX round-trip
+        cdx_reloaded = cdx_fmt.load(cdx_blob)
+        primary_round = next(c for c in cdx_reloaded if c.is_primary)
+        self.assertEqual(primary_round.software_name, "EDK II")
+        names_round = sorted(c.software_name for c in cdx_reloaded)
+        self.assertEqual(names_round, ["EDK II", "OpenSSL"])
+
+        # SPDX
+        spdx_fmt = uSwidFormatSpdx()
+        spdx_blob = spdx_fmt.save(container)
+        spdx = json.loads(spdx_blob)
+        self.assertEqual(spdx["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(len(spdx["packages"]), 2)
+        rel_types = sorted(
+            r["relationshipType"] for r in spdx.get("relationships", [])
+        )
+        self.assertEqual(rel_types, ["CONTAINS", "DESCRIBES"])
+
+        # SPDX round-trip
+        spdx_reloaded = spdx_fmt.load(spdx_blob)
+        names_spdx_round = sorted(c.software_name for c in spdx_reloaded)
+        self.assertEqual(names_spdx_round, ["EDK II", "OpenSSL"])
+        spdx_primary = next(c for c in spdx_reloaded if c.is_primary)
+        self.assertEqual(spdx_primary.software_name, "EDK II")
 
 
 if __name__ == "__main__":

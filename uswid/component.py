@@ -139,6 +139,15 @@ class uSwidComponent:
         self.ancestors: List[uSwidComponent] = []
         """List of patches"""
         self.patches: List[uSwidPatch] = []
+        self.copyright: Optional[str] = None
+        """Copyright notice (UEFI SBOM Guidelines §3.1.11). Maps to CycloneDX
+        ``component.copyright`` and SPDX ``PackageCopyrightText``."""
+        self.is_primary: bool = False
+        """Whether this component is the SBOM's Primary Component (UEFI SBOM Guidelines §3.1.1.3).
+        When true, the CycloneDX saver emits it as ``metadata.component`` and excludes it from the
+        top-level ``components[]``; the SPDX saver emits a single ``Relationship: SPDXRef-DOCUMENT
+        DESCRIBES`` it. If no component is marked primary the formatters fall back to the unique
+        firmware-type component, else the first component."""
 
     def add_source_filename(self, source_file: str) -> None:
         """Adds a source filename, i.e. what file helped created this component"""
@@ -342,6 +351,11 @@ class uSwidComponent:
             self.persistent_id = component_new.persistent_id
         if component_new.lang:
             self.lang = component_new.lang
+        if component_new.copyright:
+            self.copyright = component_new.copyright
+        # is_primary "wins": once set, it stays set; can be promoted via merge
+        if component_new.is_primary:
+            self.is_primary = True
         for entity in component_new.entities:
             self.add_entity(entity)
         for link in component_new.links:
@@ -363,6 +377,11 @@ class uSwidComponent:
             if entity_old.name == entity.name:
                 for role in entity.roles:
                     entity_old.add_role(role)
+                # merge optional contact fields if the existing entry lacks them
+                if entity.email and not entity_old.email:
+                    entity_old.email = entity.email
+                if entity.regid and not entity_old.regid:
+                    entity_old.regid = entity.regid
                 return
 
         self._entities[entity.name] = entity

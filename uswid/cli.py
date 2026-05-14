@@ -292,6 +292,47 @@ def main():
         action="store_true",
         help="Show verbose operation",
     )
+    parser.add_argument(
+        "--sbom-type",
+        dest="sbom_type",
+        default=None,
+        choices=["source", "build", "binary"],
+        help=(
+            "Declare the SBOM lifecycle type per the UEFI SBOM Guidelines §3.1.1.3 "
+            "('Type'). For CycloneDX output, sets metadata.lifecycles[].phase "
+            "(source→pre-build, build→build, binary→post-build). For SPDX output, "
+            "annotates creationInfo.comment with 'sbomType: <value>'."
+        ),
+    )
+    parser.add_argument(
+        "--lifecycle-phase",
+        dest="lifecycle_phase",
+        default=None,
+        choices=[
+            "design",
+            "pre-build",
+            "build",
+            "post-build",
+            "operations",
+            "discovery",
+            "decommission",
+        ],
+        help=(
+            "Advanced override for CycloneDX metadata.lifecycles[].phase. "
+            "Takes precedence over --sbom-type when both are set."
+        ),
+    )
+    parser.add_argument(
+        "--primary",
+        dest="primary_tag_id",
+        default=None,
+        help=(
+            "Mark the component with this tag_id, PURL, or CPE as the SBOM Primary "
+            "Component (UEFI SBOM Guidelines §3.1.1.3). Surfaces in CycloneDX "
+            "metadata.component and SPDX DESCRIBES. Default: pick the unique "
+            "firmware-type component, else the first component."
+        ),
+    )
     args = parser.parse_args()
     load_filepaths = args.load
     if not load_filepaths:
@@ -511,6 +552,30 @@ def main():
     if args.roundtrip:
         container_roundtrip(container, verbose=args.verbose)
 
+    # apply --primary: mark the named component as the SBOM Primary Component.
+    # Match against tag_id, CPE, or PURL string for ergonomics.
+    if args.primary_tag_id:
+        match: Optional[uSwidComponent] = None
+        for component in container:
+            candidates = {component.tag_id, component.cpe}
+            if component.purl:
+                candidates.add(str(component.purl))
+            if args.primary_tag_id in candidates:
+                match = component
+                break
+        if match is None:
+            print(
+                f"--primary {args.primary_tag_id!r} did not match any component "
+                f"tag_id/CPE/PURL in the merged container"
+            )
+            sys.exit(1)
+        # clear any previously marked primaries; only one primary is allowed
+        for component in container:
+            component.is_primary = False
+        match.is_primary = True
+        if args.verbose:
+            print(f"Marked {match.tag_id} as Primary Component")
+
     # add any missing evidence
     for component in container:
         for evidence in component.evidences:
@@ -546,6 +611,16 @@ def main():
                 base.objcopy = args.objcopy
                 base.cc = args.cc
                 base.cflags = args.cflags
+            # Per UEFI SBOM Guidelines §3.1.1.3 propagate Type/Lifecycle to the
+            # CycloneDX and SPDX writers so the emitted SBOM reflects user intent.
+            if isinstance(base, uSwidFormatCycloneDX):
+                if args.sbom_type:
+                    base.sbom_type = args.sbom_type
+                if args.lifecycle_phase:
+                    base.lifecycle_phase = args.lifecycle_phase
+            if isinstance(base, uSwidFormatSpdx):
+                if args.sbom_type:
+                    base.sbom_type = args.sbom_type
             blob = base.save(container)
             if blob:
                 with open(filepath, "wb") as f:

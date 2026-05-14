@@ -8,10 +8,11 @@
 #
 # pylint: disable=protected-access,too-many-locals
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 
 import json
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from uswid import __version__
@@ -63,6 +64,25 @@ def _convert_entity_to_dict(entity: uSwidEntity) -> Dict[str, Any]:
         data["name"] = entity.name
     if entity.regid:
         data["url"] = [entity.regid]
+    if entity.email:
+        data["email"] = entity.email
+    return data
+
+
+def _convert_entity_to_supplier_dict(entity: uSwidEntity) -> Dict[str, Any]:
+    """Render an entity as a CycloneDX ``supplier``/``manufacturer``/``publisher`` object.
+
+    CycloneDX models contact emails as ``contact: [{"email": "..."}]`` on supplier-like
+    objects, not as a top-level ``email`` (which is reserved for ``authors[]``).
+    Follows UEFI SBOM Guidelines §3.1.2.2 supplier example.
+    """
+    data: Dict[str, Any] = {}
+    if entity.name:
+        data["name"] = entity.name
+    if entity.regid:
+        data["url"] = [entity.regid]
+    if entity.email:
+        data["contact"] = [{"email": entity.email}]
     return data
 
 
@@ -75,7 +95,33 @@ def _convert_entity_from_dict(data: Dict[str, Any]) -> uSwidEntity:
             regid = regid[0]
     except IndexError:
         regid = None
-    return uSwidEntity(name=data.get("name"), regid=regid)
+    email = data.get("email")
+    # supplier/manufacturer/publisher use contact[].email; pick the first if present
+    if not email:
+        contact = data.get("contact")
+        if isinstance(contact, list) and contact:
+            first = contact[0]
+            if isinstance(first, dict):
+                email = first.get("email")
+    return uSwidEntity(name=data.get("name"), regid=regid, email=email)
+
+
+_VALID_CDX_LIFECYCLE_PHASES: Set[str] = {
+    "design",
+    "pre-build",
+    "build",
+    "post-build",
+    "operations",
+    "discovery",
+    "decommission",
+}
+
+
+_SBOM_TYPE_TO_LIFECYCLE_PHASE: Dict[str, str] = {
+    "source": "pre-build",
+    "build": "build",
+    "binary": "post-build",
+}
 
 
 class uSwidFormatCycloneDX(uSwidFormatBase):
@@ -86,6 +132,13 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
         uSwidFormatBase.__init__(self, "CycloneDX")
         self.serial_number: Optional[str] = None
         self.timestamp: Optional[str] = None
+        self.lifecycle_phase: Optional[str] = None
+        """Override for ``metadata.lifecycles[].phase``. One of
+        ``design|pre-build|build|post-build|operations|discovery|decommission``."""
+        self.sbom_type: Optional[str] = None
+        """High-level SBOM type from UEFI SBOM Guidelines §3.1.1.3 ("Type"):
+        ``source`` → ``pre-build``, ``build`` → ``build``, ``binary`` → ``post-build``.
+        Used to derive ``metadata.lifecycles[].phase`` if ``lifecycle_phase`` is not set."""
 
     def _load_patch(self, data: Dict[str, Any]) -> uSwidPatch:
 
@@ -120,6 +173,17 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
         component.software_version = data.get("version")
         component.summary = data.get("description")
         component.tag_id = data.get("bom-ref", str(uuid.uuid4()))
+        # UEFI SBOM Guidelines §3.1.8: when bom-ref is a CPE, also populate the
+        # dedicated cpe attribute so consumers that look in either place still find it.
+        if (
+            not component.cpe
+            and isinstance(component.tag_id, str)
+            and component.tag_id.startswith("cpe:")
+        ):
+            component.cpe = component.tag_id
+        # UEFI SBOM Guidelines §3.1.11: Copyright Holder
+        if data.get("copyright"):
+            component.copyright = data.get("copyright")
 
         if "swid" in data:
             if not component.tag_id:
@@ -249,10 +313,11 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
 
         container = uSwidContainer()
 
-        # primary component may live in metadata
+        # primary component may live in metadata (UEFI SBOM Guidelines §3.1.1.3)
         if metadata and metadata.get("component"):
             component = uSwidComponent()
             self._load_component_internal(component, metadata["component"])
+            component.is_primary = True
             if not component.tag_version:
                 try:
                     component.tag_version = int(root["version"])
@@ -286,23 +351,33 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
                     uSwidEntity(name=tag_creator, roles=[uSwidEntityRole.TAG_CREATOR])
                 )
 
+        # CycloneDX dependencies[*].dependsOn is a JSON array of refs per the spec
+        # (UEFI SBOM Guidelines §3.1.9). Accept the legacy string form for back-compat
+        # with SBOMs produced by older uSWID versions.
         for dep in root.get("dependencies", []):
             component_ref = container.get_by_id(dep["ref"])
-            component_other = container.get_by_id(dep["dependsOn"])
             if not component_ref:
                 continue
-            if not component_other:
-                continue
-            if component_other.tag_id == "compiler":
-                component_ref.add_link(
-                    uSwidLink(
-                        rel=uSwidLinkRel.COMPILER, href=component_other.software_name
+            depends_on = dep.get("dependsOn", [])
+            if isinstance(depends_on, str):
+                depends_on = [depends_on]
+            for depends_on_ref in depends_on:
+                component_other = container.get_by_id(depends_on_ref)
+                if not component_other:
+                    continue
+                if component_other.tag_id == "compiler":
+                    component_ref.add_link(
+                        uSwidLink(
+                            rel=uSwidLinkRel.COMPILER,
+                            href=component_other.software_name,
+                        )
                     )
-                )
-            else:
-                component_ref.add_link(
-                    uSwidLink(rel=uSwidLinkRel.COMPONENT, href=component_other.tag_id)
-                )
+                else:
+                    component_ref.add_link(
+                        uSwidLink(
+                            rel=uSwidLinkRel.COMPONENT, href=component_other.tag_id
+                        )
+                    )
 
         for ann in root.get("annotations", []):
             component_ref = container.get_by_id(ann["bom-ref"])
@@ -315,6 +390,67 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
             component_ref.add_evidence(uSwidEvidence(date=date, device_id=ann["text"]))
 
         return container
+
+    @staticmethod
+    def _bom_ref_for(component: uSwidComponent) -> Optional[str]:
+        """Return the canonical CycloneDX ``bom-ref`` for a component.
+
+        UEFI SBOM Guidelines §3.1.8 prefers a CPE-style ``bom-ref`` when one is available
+        so it can be used directly for NVD vulnerability matching. Falls back to the
+        internal ``tag_id`` (often a PURL or GUID) when no CPE is set.
+        """
+        if component.cpe:
+            return component.cpe
+        return component.tag_id
+
+    def _resolve_primary(
+        self, container: uSwidContainer
+    ) -> Optional[uSwidComponent]:
+        """Pick the SBOM's Primary Component (UEFI SBOM Guidelines §3.1.1.3).
+
+        Rules, in order:
+          1. The first component with ``is_primary=True`` (set explicitly by the caller).
+          2. If exactly one component has ``type=firmware``, use it.
+          3. Otherwise, use the first component in the container.
+        """
+        primaries = [c for c in container if c.is_primary]
+        if primaries:
+            return primaries[0]
+        firmwares = [
+            c for c in container if c.type == uSwidComponentType.FIRMWARE
+        ]
+        if len(firmwares) == 1:
+            return firmwares[0]
+        for c in container:
+            return c
+        return None
+
+    def _resolve_lifecycle_phase(self, container: uSwidContainer) -> str:
+        """Pick the lifecycle phase for ``metadata.lifecycles[]``.
+
+        Precedence: explicit ``lifecycle_phase`` > derived from ``sbom_type``
+        (UEFI SBOM Guidelines §3.1.1.3 Type) > legacy compiler-based heuristic.
+        """
+        if self.lifecycle_phase:
+            if self.lifecycle_phase not in _VALID_CDX_LIFECYCLE_PHASES:
+                raise NotSupportedError(
+                    f"unknown lifecycle phase {self.lifecycle_phase!r}; "
+                    f"expected one of {sorted(_VALID_CDX_LIFECYCLE_PHASES)}"
+                )
+            return self.lifecycle_phase
+        if self.sbom_type:
+            try:
+                return _SBOM_TYPE_TO_LIFECYCLE_PHASE[self.sbom_type]
+            except KeyError as exc:
+                raise NotSupportedError(
+                    f"unknown sbom_type {self.sbom_type!r}; "
+                    f"expected source|build|binary"
+                ) from exc
+        # legacy heuristic: build if any component has a compiler link
+        for component in container:
+            if component.get_link_by_rel(uSwidLinkRel.COMPILER):
+                return "build"
+        return "pre-build"
 
     def save(self, container: uSwidContainer) -> bytes:
         # header
@@ -331,63 +467,104 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
 
         # metadata
         metadata: Dict[str, Any] = {}
-        metadata["timestamp"] = self.timestamp or datetime.now(timezone.utc).isoformat()
+        # UEFI SBOM Guidelines §3.1.1.2: timestamp MUST be ISO-8601 UTC with `Z` suffix.
+        metadata["timestamp"] = self.timestamp or datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         root["metadata"] = metadata
 
-        # find tag creator
-        metadata_authors: List[str] = []
+        # UEFI SBOM Guidelines §3.1.1.1: collect SBOM authors (tag creators) with email.
+        metadata_authors: List[Dict[str, str]] = []
+        seen_author_names: Set[str] = set()
         for component in container:
-            entity = component.get_entity_by_role(uSwidEntityRole.TAG_CREATOR)
-            if not entity:
-                continue
-            if entity.name in metadata_authors:
-                continue
-            if entity.name in ["NOASSERTION"]:
-                continue
-            metadata_authors.append(entity.name)
+            for entity in component.entities:
+                if uSwidEntityRole.TAG_CREATOR not in entity.roles:
+                    continue
+                if not entity.name or entity.name in ["NOASSERTION"]:
+                    continue
+                if entity.name in seen_author_names:
+                    continue
+                seen_author_names.add(entity.name)
+                author: Dict[str, str] = {"name": entity.name}
+                if entity.email:
+                    author["email"] = entity.email
+                metadata_authors.append(author)
 
         # generator
         metadata["tools"] = [
             {"vendor": "uSWID Authors", "name": "uSWID", "version": __version__}
         ]
         if metadata_authors:
-            data_metadata_authors: List[Dict[str, str]] = []
-            for name in metadata_authors:
-                data_metadata_authors.append({"name": name})
-            metadata["authors"] = data_metadata_authors
+            metadata["authors"] = metadata_authors
 
-        # we are generating as part of the build?
-        has_compiler = False
-        for component in container:
-            if component.get_link_by_rel(uSwidLinkRel.COMPILER):
-                has_compiler = True
-                break
-        metadata["lifecycles"] = [{"phase": "build" if has_compiler else "pre-build"}]
+        metadata["lifecycles"] = [{"phase": self._resolve_lifecycle_phase(container)}]
 
-        # find components
+        # UEFI SBOM Guidelines §3.1.1.3: emit Primary Component to metadata.component,
+        # NOT into the top-level components[] array. Falls back to firmware/first heuristic.
+        primary = self._resolve_primary(container)
+        if primary is not None:
+            metadata["component"] = self._save_component(primary)
+
+        # Components other than the primary go in the top-level array.
         components: List[Dict[str, Any]] = []
-        dependencies: List[Dict[str, str]] = []
+        # UEFI SBOM Guidelines §3.1.9: dependencies[] must use dependsOn as an array of refs.
+        deps_by_ref: Dict[str, List[str]] = defaultdict(list)
+        emitted_synthetic_refs: Set[str] = set()
+        seen_components: Set[str] = set()
+        if primary is not None and primary.tag_id:
+            seen_components.add(primary.tag_id)
+
+        # Build a tag_id -> bom-ref map so dependency edges (which use tag_id internally)
+        # are emitted with the same bom-ref string a consumer sees on each component.
+        tag_id_to_bom_ref: Dict[str, str] = {}
         for component in container:
-            components.append(self._save_component(component))
+            if component.tag_id:
+                resolved = self._bom_ref_for(component) or component.tag_id
+                tag_id_to_bom_ref[component.tag_id] = resolved
+
+        for component in container:
+            if component is not primary:
+                if component.tag_id and component.tag_id in seen_components:
+                    continue
+                components.append(self._save_component(component))
+                if component.tag_id:
+                    seen_components.add(component.tag_id)
+            # accumulate dependency edges from BOTH the primary and the children
+            src_ref = self._bom_ref_for(component)
+            if not src_ref:
+                continue
             for link in component.links:
-                if link.rel in [uSwidLinkRel.COMPILER]:
-                    components.append(
-                        self._save_component(
-                            uSwidComponent(tag_id="compiler", software_name=link.href)
+                if link.rel == uSwidLinkRel.COMPILER:
+                    if "compiler" not in emitted_synthetic_refs:
+                        components.append(
+                            self._save_component(
+                                uSwidComponent(
+                                    tag_id="compiler", software_name=link.href
+                                )
+                            )
                         )
-                    )
-                    dependencies.append(
-                        {"ref": component.tag_id, "dependsOn": "compiler"}
-                    )
-                if link.rel in [uSwidLinkRel.COMPONENT]:
-                    dependencies.append(
-                        {"ref": component.tag_id, "dependsOn": link.href}
-                    )
+                        emitted_synthetic_refs.add("compiler")
+                    deps_by_ref[src_ref].append("compiler")
+                elif link.rel == uSwidLinkRel.COMPONENT:
+                    if link.href:
+                        resolved_dst = tag_id_to_bom_ref.get(link.href, link.href)
+                        deps_by_ref[src_ref].append(resolved_dst)
 
         # optional
         if components:
             root["components"] = components
-        if dependencies:
+        if deps_by_ref:
+            dependencies: List[Dict[str, Any]] = []
+            for ref in sorted(deps_by_ref.keys()):
+                # deduplicate while preserving order
+                seen: Set[str] = set()
+                ordered: List[str] = []
+                for dep in deps_by_ref[ref]:
+                    if dep in seen:
+                        continue
+                    seen.add(dep)
+                    ordered.append(dep)
+                dependencies.append({"ref": ref, "dependsOn": ordered})
             root["dependencies"] = dependencies
 
         return json.dumps(root, indent=2, ensure_ascii=False).encode()
@@ -422,8 +599,11 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
             root["version"] = component.software_version
         if component.summary:
             root["description"] = component.summary
-        if component.tag_id:
-            root["bom-ref"] = component.tag_id
+        # UEFI SBOM Guidelines §3.1.8: prefer CPE as bom-ref when available so the
+        # primary identifier is the one used for NVD vulnerability matching.
+        bom_ref = self._bom_ref_for(component)
+        if bom_ref:
+            root["bom-ref"] = bom_ref
 
         swid: Dict[str, Any] = {}
         if component.tag_version and component.tag_version > 1:
@@ -498,18 +678,20 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
         if licenses:
             root["licenses"] = licenses
 
-        # supplier and authors
+        # supplier and authors (UEFI SBOM Guidelines §3.1.2.2, §3.1.1.1).
+        # supplier/manufacturer/publisher use the "supplier" emitter so contact emails land
+        # under ``contact: [{"email": …}]``; authors keep the in-line ``email`` field.
         supplier: Optional[Dict[str, Any]] = None
         publisher: Optional[Dict[str, Any]] = None
         authors: List[Dict[str, Any]] = []
         manufacturer: Optional[Dict[str, Any]] = None
         for entity in component.entities:
             if uSwidEntityRole.LICENSOR in entity.roles:
-                manufacturer = _convert_entity_to_dict(entity)
+                manufacturer = _convert_entity_to_supplier_dict(entity)
             if uSwidEntityRole.DISTRIBUTOR in entity.roles:
-                publisher = _convert_entity_to_dict(entity)
+                publisher = _convert_entity_to_supplier_dict(entity)
             if uSwidEntityRole.SOFTWARE_CREATOR in entity.roles:
-                supplier = _convert_entity_to_dict(entity)
+                supplier = _convert_entity_to_supplier_dict(entity)
             if uSwidEntityRole.MAINTAINER in entity.roles:
                 authors.append(_convert_entity_to_dict(entity))
         if supplier:
@@ -527,6 +709,9 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
             # the organization that created the component --
             # manufacturer is common in components created through automated processes
             root["manufacturer"] = manufacturer
+        # UEFI SBOM Guidelines §3.1.11: Copyright Holder
+        if component.copyright:
+            root["copyright"] = component.copyright
         hashes: List[Any] = []
         for payload in component.payloads:
             for ihash in payload.hashes:

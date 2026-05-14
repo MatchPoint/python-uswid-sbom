@@ -57,3 +57,9 @@ docs/_build/
 # PyBuilder
 target/
 /tmp/
+
+# UEFI SBOM Guidelines (local-only, not committed)
+docs/uefi/
+
+# Integration test cache (EDK2 clone)
+tests/_edk2_cache/
