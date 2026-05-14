@@ -351,6 +351,11 @@ _PROJECT_SUFFIX_RE = re.compile(r"[+][a-zA-Z0-9_-]+$")
 _BARE_COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 # CVE identifier pattern.
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d+\b", re.IGNORECASE)
+# INF file parsing helpers for submodule source-reference detection.
+# Matches "DEFINE VAR = value" lines inside an [Defines] section.
+_INF_DEFINE_RE = re.compile(r"^\s*DEFINE\s+(\w+)\s*=\s*(\S.*?)\s*$", re.IGNORECASE)
+# Matches section headers such as [Defines], [Sources], [Sources.X64].
+_INF_SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 
 
 def _normalize_submodule_version(raw: str) -> Tuple[str, int, Optional[str], Optional[str]]:
@@ -486,19 +491,99 @@ def _scan_git_log_for_cves(
     return patches
 
 
+def _parse_inf_submodule_refs(
+    inf_path: str,
+    submodule_dir_to_tag: Dict[str, str],
+) -> List[str]:
+    """Return tag_ids of submodule components whose source tree is directly
+    incorporated by *inf_path*.
+
+    Two signals are used:
+
+    1. ``DEFINE VAR = path`` entries in the ``[Defines]`` section — the resolved
+       first path segment is checked against *submodule_dir_to_tag*.
+    2. The leading path segment of every ``[Sources*]`` entry (after expanding
+       ``$(VAR)`` references) — checked the same way.
+
+    This correctly detects all current EDK2 patterns:
+
+    * ``DEFINE OPENSSL_PATH = openssl`` + ``$(OPENSSL_PATH)/crypto/...`` (OpensslLib)
+    * Bare ``mbedtls/library/aes.c`` with no DEFINE (MbedTlsLib)
+    * ``cmocka/src/cmocka.c`` (CmockaLib)
+    * ``DEFINE FDT_LIB_PATH = libfdt/libfdt`` (BaseFdtLib)
+    """
+    inf_dir = os.path.dirname(os.path.realpath(inf_path))
+    defines: Dict[str, str] = {}
+    in_defines = False
+    in_sources = False
+    found: Set[str] = set()
+
+    def _first_abs(path_str: str) -> Optional[str]:
+        """Expand $(VAR) and return the absolute path of the first segment."""
+        for var, val in defines.items():
+            path_str = path_str.replace(f"$({var})", val)
+        if "$(" in path_str:
+            return None  # still-unexpanded reference — skip
+        first_seg = path_str.replace("\\", "/").split("/")[0]
+        if not first_seg:
+            return None
+        return os.path.normpath(os.path.join(inf_dir, first_seg))
+
+    try:
+        with open(inf_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line_s = line.strip()
+                if not line_s or line_s.startswith("#"):
+                    continue
+                sec_m = _INF_SECTION_RE.match(line_s)
+                if sec_m:
+                    sec = sec_m.group(1).split(".")[0].strip().upper()
+                    in_defines = sec == "DEFINES"
+                    in_sources = sec.startswith("SOURCES")
+                    continue
+                if in_defines:
+                    def_m = _INF_DEFINE_RE.match(line)
+                    if def_m:
+                        defines[def_m.group(1)] = def_m.group(2)
+                elif in_sources:
+                    src = line_s.split("|")[0].strip()  # drop conditional build flag
+                    abs_first = _first_abs(src)
+                    if abs_first and abs_first in submodule_dir_to_tag:
+                        found.add(submodule_dir_to_tag[abs_first])
+    except OSError:
+        return []
+
+    # Also probe DEFINE values directly: catches the OPENSSL_PATH pattern even
+    # for .inf files where the [Sources] section is absent or skipped early.
+    for val in defines.values():
+        if "$(" in val:
+            continue
+        abs_first = _first_abs(val)
+        if abs_first and abs_first in submodule_dir_to_tag:
+            found.add(submodule_dir_to_tag[abs_first])
+
+    return list(found)
+
+
 def _make_submodule_components(
     edk2_dir: str, parent: uSwidComponent
-) -> List[uSwidComponent]:
+) -> Tuple[List[uSwidComponent], Dict[str, str]]:
     """Per UEFI Guidelines §2.3.1, materialise ``.gitmodules`` as components.
 
     Each populated submodule becomes a ``uSwidComponent`` linked under the parent
     EDK2 component via ``uSwidLinkRel.COMPONENT``. ``software_version`` is
     discovered with ``git describe`` inside the submodule when possible.
+
+    Returns ``(components, submodule_dir_to_tag)`` where *submodule_dir_to_tag*
+    maps each absolute submodule directory path to its component ``tag_id``.
+    That map is used by the caller to wire INF wrapper components to the
+    submodule components they directly incorporate via ``dependsOn``.
     """
     gitmodules = os.path.join(edk2_dir, ".gitmodules")
     if not os.path.isfile(gitmodules):
-        return []
+        return [], {}
     submodules: List[uSwidComponent] = []
+    dir_to_tag: Dict[str, str] = {}
     for name, fields in _parse_gitmodules_full(gitmodules).items():
         rel_path = fields.get("path")
         url = fields.get("url") or ""
@@ -568,8 +653,9 @@ def _make_submodule_components(
         if url:
             comp.add_link(uSwidLink(rel=uSwidLinkRel.SEE_ALSO, href=url))
         parent.add_link(uSwidLink(rel=uSwidLinkRel.COMPONENT, href=comp.tag_id))
+        dir_to_tag[os.path.normpath(sub_dir)] = tag_id
         submodules.append(comp)
-    return submodules
+    return submodules, dir_to_tag
 
 
 class TestEdk2IntegrationSbom(unittest.TestCase):
@@ -672,6 +758,9 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
         cdx_fmt = uSwidFormatCycloneDX()
         cdx_fmt.sbom_type = os.environ.get("USWID_EDK2_SBOM_TYPE") or "source"
         per_inf_blobs: Dict[str, bytes] = {}
+        # Maps each successfully parsed inf_path to the non-primary component's
+        # tag_id so we can wire submodule dependsOn links after the merge.
+        inf_to_tag: Dict[str, Optional[str]] = {}
         skip_count = 0
         with ThreadPoolExecutor(max_workers=12) as pool:
             futures = [
@@ -696,6 +785,18 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
                 with open(out_path, "wb") as f:
                     f.write(blob)
                 per_inf_blobs[inf_path] = blob
+                # Record the INF component's post-roundtrip identity for later
+                # dependency wiring.  After the CDX save/load cycle the
+                # component's tag_id becomes its bom-ref, which _bom_ref_for()
+                # resolves to the CPE when one is present (§3.1.8), otherwise
+                # the PURL.  Store that same value so merged.get_by_id() finds
+                # it after the merge step.
+                for comp in per_inf:
+                    if not comp.is_primary:
+                        saved_id = comp.cpe if comp.cpe else comp.tag_id
+                        if saved_id:
+                            inf_to_tag[inf_path] = saved_id
+                        break
 
         attempted = len(inf_paths)
         if attempted > 0:
@@ -730,11 +831,35 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
             firmware[0].is_primary = True
 
         # full mode: add synthetic submodule components per UEFI §2.3.1
+        submodule_dir_to_tag: Dict[str, str] = {}
         if self.mode == "full":
             primary = next(c for c in merged if c.is_primary)
-            for sub in _make_submodule_components(self.edk2_dir, primary):
+            sub_comps, submodule_dir_to_tag = _make_submodule_components(
+                self.edk2_dir, primary
+            )
+            for sub in sub_comps:
                 if not merged.get_by_id(sub.tag_id):
                     merged.append(sub)
+
+            # Wire INF wrapper components to the submodule(s) whose source tree
+            # they directly incorporate, based on [Defines]/[Sources] analysis.
+            # This produces accurate dependsOn edges in the CycloneDX output.
+            if submodule_dir_to_tag:
+                for inf_path, comp_tag_id in inf_to_tag.items():
+                    if not comp_tag_id:
+                        continue
+                    sub_tag_ids = _parse_inf_submodule_refs(
+                        inf_path, submodule_dir_to_tag
+                    )
+                    if not sub_tag_ids:
+                        continue
+                    comp = merged.get_by_id(comp_tag_id)
+                    if not comp:
+                        continue
+                    for sub_tag_id in sub_tag_ids:
+                        comp.add_link(
+                            uSwidLink(rel=uSwidLinkRel.COMPONENT, href=sub_tag_id)
+                        )
 
         # save final merged SBOM
         final_fmt = uSwidFormatCycloneDX()
