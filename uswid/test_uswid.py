@@ -226,11 +226,17 @@ class TestSwidEntity(unittest.TestCase):
         }
       ],
       "supplier": {
-        "name": "EDK II developers"
+        "name": "TianoCore",
+        "url": [
+          "https://www.tianocore.org"
+        ]
       },
       "authors": [
         {
-          "name": "EDK II authors"
+          "name": "TianoCore",
+          "url": [
+            "https://www.tianocore.org"
+          ]
         }
       ]
     }
@@ -259,11 +265,20 @@ class TestSwidEntity(unittest.TestCase):
         }
       ],
       "supplier": {
-        "name": "EDK II developers"
+        "name": "TianoCore",
+        "url": [
+          "https://www.tianocore.org"
+        ]
       },
       "authors": [
         {
           "name": "RH"
+        },
+        {
+          "name": "TianoCore",
+          "url": [
+            "https://www.tianocore.org"
+          ]
         }
       ],
       "properties": [
@@ -581,7 +596,7 @@ class TestSwidEntity(unittest.TestCase):
             jsonstr,
             '{"type": "backport", '
             '"diff": {"url": "http://foo"}, '
-            '"resolves": {"description": "foo", "references": ["foo", "bar", "baz"]}}',
+            '"resolves": [{"type": "security", "description": "foo", "references": ["foo", "bar", "baz"]}]}',
         )
 
         # CycloneDX import
@@ -1399,6 +1414,139 @@ class TestUefiSbomGuidelinesConformance(unittest.TestCase):
         self.assertEqual(names_spdx_round, ["EDK II", "OpenSSL"])
         spdx_primary = next(c for c in spdx_reloaded if c.is_primary)
         self.assertEqual(spdx_primary.software_name, "EDK II")
+
+
+    # ----- pedigree / patch CycloneDX compliance -----
+
+    def test_cdx_pedigree_resolves_is_array(self):
+        """CycloneDX spec: pedigree.patches[].resolves MUST be a JSON array."""
+        container = self._build_edk2_openssl_container()
+        openssl = next(c for c in container if c.software_name == "OpenSSL")
+        openssl.patches = [
+            uSwidPatch(
+                type=uSwidPatchType.BACKPORT,
+                url="https://github.com/openssl/openssl/commit/abc123",
+                description="Fix heap overflow CVE-2024-0001",
+                references=["CVE-2024-0001"],
+            )
+        ]
+        data = json.loads(uSwidFormatCycloneDX().save(container))
+        openssl_comp = next(c for c in data["components"] if c["name"] == "OpenSSL")
+        self.assertIn("pedigree", openssl_comp)
+        patches = openssl_comp["pedigree"]["patches"]
+        self.assertIsInstance(patches, list)
+        self.assertEqual(len(patches), 1)
+        resolves = patches[0]["resolves"]
+        self.assertIsInstance(resolves, list, "resolves must be a JSON array per CycloneDX spec")
+        self.assertEqual(resolves[0]["type"], "security")
+        self.assertIn("CVE-2024-0001", resolves[0]["references"])
+
+    def test_cdx_pedigree_resolves_roundtrip(self):
+        """Patch data survives a full CycloneDX save→load cycle."""
+        container = self._build_edk2_openssl_container()
+        openssl = next(c for c in container if c.software_name == "OpenSSL")
+        openssl.patches = [
+            uSwidPatch(
+                type=uSwidPatchType.BACKPORT,
+                url="https://example.com/patch/1",
+                description="Security fix",
+                references=["CVE-2024-9999", "https://example.com/advisory"],
+            )
+        ]
+        fmt = uSwidFormatCycloneDX()
+        blob = fmt.save(container)
+        reloaded = fmt.load(blob)
+        openssl_rt = next(c for c in reloaded if c.software_name == "OpenSSL")
+        self.assertIsNotNone(openssl_rt.patches)
+        self.assertEqual(len(openssl_rt.patches), 1)
+        patch = openssl_rt.patches[0]
+        self.assertEqual(patch.type, uSwidPatchType.BACKPORT)
+        self.assertEqual(patch.url, "https://example.com/patch/1")
+        self.assertEqual(patch.description, "Security fix")
+        self.assertIn("CVE-2024-9999", patch.references)
+
+    def test_cdx_pedigree_load_legacy_resolves_object(self):
+        """Backward compat: loading old single-object resolves format still works."""
+        legacy_json = json.dumps({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.6",
+            "version": 1,
+            "metadata": {
+                "timestamp": "2024-01-01T00:00:00Z",
+                "component": {
+                    "type": "firmware",
+                    "name": "EDK II",
+                    "version": "202411",
+                    "bom-ref": "pkg:github/tianocore/edk2@202411",
+                },
+            },
+            "components": [
+                {
+                    "type": "library",
+                    "name": "OpenSSL",
+                    "version": "3.0.9",
+                    "bom-ref": "pkg:generic/openssl@3.0.9",
+                    "pedigree": {
+                        "patches": [
+                            {
+                                "type": "backport",
+                                "diff": {"url": "https://example.com/diff"},
+                                "resolves": {
+                                    "description": "Legacy single-object format",
+                                    "references": ["CVE-2023-0001"],
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        })
+        fmt = uSwidFormatCycloneDX()
+        container = fmt.load(legacy_json.encode())
+        openssl = next((c for c in container if c.software_name == "OpenSSL"), None)
+        self.assertIsNotNone(openssl)
+        self.assertIsNotNone(openssl.patches)
+        self.assertEqual(len(openssl.patches), 1)
+        patch = openssl.patches[0]
+        self.assertEqual(patch.description, "Legacy single-object format")
+        self.assertIn("CVE-2023-0001", patch.references)
+
+    def test_cdx_pedigree_multiple_patches(self):
+        """Multiple patches are all preserved in a round-trip."""
+        container = self._build_edk2_openssl_container()
+        openssl = next(c for c in container if c.software_name == "OpenSSL")
+        openssl.patches = [
+            uSwidPatch(
+                type=uSwidPatchType.BACKPORT,
+                url="https://example.com/patch/1",
+                description="Fix CVE-2024-0001",
+                references=["CVE-2024-0001"],
+            ),
+            uSwidPatch(
+                type=uSwidPatchType.BACKPORT,
+                url="https://example.com/patch/2",
+                description="Fix CVE-2024-0002",
+                references=["CVE-2024-0002"],
+            ),
+        ]
+        fmt = uSwidFormatCycloneDX()
+        blob = fmt.save(container)
+
+        # Structural check: resolves is array in both patches
+        data = json.loads(blob)
+        openssl_comp = next(c for c in data["components"] if c["name"] == "OpenSSL")
+        patches_json = openssl_comp["pedigree"]["patches"]
+        self.assertEqual(len(patches_json), 2)
+        for p in patches_json:
+            self.assertIsInstance(p["resolves"], list)
+
+        # Round-trip check
+        reloaded = fmt.load(blob)
+        openssl_rt = next(c for c in reloaded if c.software_name == "OpenSSL")
+        self.assertEqual(len(openssl_rt.patches), 2)
+        descriptions = {p.description for p in openssl_rt.patches}
+        self.assertIn("Fix CVE-2024-0001", descriptions)
+        self.assertIn("Fix CVE-2024-0002", descriptions)
 
 
 if __name__ == "__main__":
