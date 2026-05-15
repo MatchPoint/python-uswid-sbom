@@ -12,11 +12,12 @@
       "description": "A cross-platform firmware development environment for UEFI and PI specifications",
       "authors": [
         {
-          "name": "EDK II authors"
+          "name": "TianoCore"
         }
       ],
       "supplier": {
-        "name": "EDK II developers"
+        "name": "TianoCore",
+        "url": ["https://www.tianocore.org"]
       },
       "licenses": [
         {

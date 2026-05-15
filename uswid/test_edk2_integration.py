@@ -335,12 +335,16 @@ def _build_per_inf_container(
 # Only packages with confirmed NVD entries are listed; others stay PURL-only.
 # Verified against NVD CPE dictionary May 2026.
 _SUBMODULE_CPE_MAP: Dict[str, Tuple[str, str]] = {
-    "openssl/openssl":  ("openssl",           "openssl"),
-    "ARMmbed/mbedtls":  ("arm",               "mbed_tls"),
-    "akheron/jansson":  ("jansson_project",   "jansson"),
-    "kkos/oniguruma":   ("oniguruma_project", "oniguruma"),
-    "google/brotli":    ("google",            "brotli"),
-    "DMTF/libspdm":     ("dmtf",             "libspdm"),
+    # vendor field is position-4 in CPE 2.3 (company name, not CPU architecture).
+    # mbedTLS is published by Arm Ltd but NVD has also attributed it to
+    # trustedfirmware and mbed.  Using wildcard (*) avoids false negatives when
+    # NVD reclassifies the vendor while keeping the product name precise.
+    "openssl/openssl":  ("openssl",  "openssl"),
+    "ARMmbed/mbedtls":  ("*",        "mbed_tls"),
+    "akheron/jansson":  ("*",        "jansson"),
+    "kkos/oniguruma":   ("*",        "oniguruma"),
+    "google/brotli":    ("google",   "brotli"),
+    "DMTF/libspdm":     ("dmtf",    "libspdm"),
 }
 
 # Regex to extract the git-describe patch suffix: -N-gHASH at end of string.

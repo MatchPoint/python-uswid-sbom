@@ -151,15 +151,22 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
             patch.url = str(data["diff"]["url"])
         except KeyError:
             pass
-        try:
-            patch.description = str(data["resolves"]["description"])
-        except KeyError:
-            pass
-        try:
-            for ref in data["resolves"]["references"]:
-                patch.references.append(str(ref))
-        except KeyError:
-            pass
+        # ``resolves`` is an array of Issue objects per the CycloneDX spec.
+        # We persist only one entry per patch (the first), but handle both the
+        # legacy scalar-object form (written by older versions of this code) and
+        # the correct array form for forward compatibility.
+        resolves_raw = data.get("resolves")
+        if resolves_raw:
+            resolves_obj = resolves_raw[0] if isinstance(resolves_raw, list) else resolves_raw
+            try:
+                patch.description = str(resolves_obj["description"])
+            except (KeyError, TypeError):
+                pass
+            try:
+                for ref in resolves_obj["references"]:
+                    patch.references.append(str(ref))
+            except (KeyError, TypeError):
+                pass
         return patch
 
     def _load_component_internal(
@@ -577,12 +584,13 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
         if patch.url:
             data["diff"] = {"url": patch.url}
         if patch.description or patch.references:
-            resolves: Dict[str, Any] = {}
+            # CycloneDX spec: resolves is an array of Issue objects.
+            issue: Dict[str, Any] = {"type": "security"}
             if patch.description:
-                resolves["description"] = patch.description
+                issue["description"] = patch.description
             if patch.references:
-                resolves["references"] = patch.references
-            data["resolves"] = resolves
+                issue["references"] = patch.references
+            data["resolves"] = [issue]
         return data
 
     def _save_component(self, component: uSwidComponent) -> Dict[str, Any]:
