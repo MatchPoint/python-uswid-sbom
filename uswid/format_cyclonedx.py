@@ -30,6 +30,21 @@ from .hash import uSwidHash, uSwidHashAlg
 from .patch import uSwidPatch, uSwidPatchType
 
 
+def _cyclonedx_issue_type_for_patch(patch: uSwidPatch) -> str:
+    """Map a :class:`uSwidPatch` to CycloneDX ``Issue.type`` (1.6 enum).
+
+    Allowed values are only ``defect``, ``enhancement``, and ``security``.
+    """
+    if patch.type == uSwidPatchType.SECURITY:
+        return "security"
+    for ref in patch.references or []:
+        if isinstance(ref, str) and ref.upper().startswith("CVE-"):
+            return "security"
+    if patch.type in (uSwidPatchType.BACKPORT, uSwidPatchType.CHERRY_PICK):
+        return "defect"
+    return "enhancement"
+
+
 def _convert_hash_alg_to_str(alg_id: uSwidHashAlg) -> str:
     return {
         uSwidHashAlg.SHA1: "SHA-1",
@@ -584,8 +599,10 @@ class uSwidFormatCycloneDX(uSwidFormatBase):
         if patch.url:
             data["diff"] = {"url": patch.url}
         if patch.description or patch.references:
-            # CycloneDX spec: resolves is an array of Issue objects.
-            issue: Dict[str, Any] = {"type": "security"}
+            # CycloneDX spec: resolves is an array of Issue objects (type ∈ defect|enhancement|security).
+            issue: Dict[str, Any] = {
+                "type": _cyclonedx_issue_type_for_patch(patch),
+            }
             if patch.description:
                 issue["description"] = patch.description
             if patch.references:

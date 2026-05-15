@@ -418,33 +418,38 @@ def _normalize_submodule_version(raw: str) -> Tuple[str, int, Optional[str], Opt
     return clean_version, patch_count, commit_sha, base_tag
 
 
-def _scan_git_log_for_cves(
+def _patches_for_commits_since_tag(
     cwd: str, base_tag: str, vcs_url: str
 ) -> List[uSwidPatch]:
-    """Scan git log from *base_tag* to HEAD for CVE mentions.
+    """Return one :class:`uSwidPatch` per commit in ``base_tag..HEAD`` (oldest first).
 
-    Returns a list of :class:`uSwidPatch` objects:
+    Supply-chain reviewers expect each post-release commit to be listed
+    individually in ``pedigree.patches[]``, not a single roll-up message.
 
-    * One **summary** entry (type ``cherry-pick``) noting the total commit
-      count, always prepended so readers see the range at a glance.
-    * One **security** entry per commit that mentions a CVE in its subject
-      or body, carrying the CVE IDs in ``references``.
+    * **BACKPORT** — normal commits after the tag (subject line as ``description``).
+    * **SECURITY** — same, when the commit message references one or more
+      ``CVE-YYYY-NNNN`` IDs; those IDs are listed in ``references``.
 
-    Commits are scanned using ``git log <base_tag>..HEAD`` with a separator
-    record format so multi-line bodies are handled without ambiguity.
+    Each patch carries a VCS commit URL when *vcs_url* is an ``http(s)`` URL.
+    Parsing uses ``git log <base_tag>..HEAD --reverse --no-merges`` with a
+    separator record format so multi-line bodies are unambiguous.
     """
     _SEP = "---USWID_COMMIT_END---"
     try:
         raw_log = _run_git(
-            ["log", f"{base_tag}..HEAD", "--no-merges",
-             f"--format=%H%x09%s%n%b%n{_SEP}"],
+            [
+                "log",
+                f"{base_tag}..HEAD",
+                "--no-merges",
+                "--reverse",
+                f"--format=%H%x09%s%n%b%n{_SEP}",
+            ],
             cwd=cwd,
         )
     except subprocess.CalledProcessError:
         return []
 
     patches: List[uSwidPatch] = []
-    total_commits = 0
     current_sha = current_subject = ""
     current_body_lines: List[str] = []
 
@@ -454,18 +459,21 @@ def _scan_git_log_for_cves(
             return
         full_text = current_subject + " " + " ".join(current_body_lines)
         cves = sorted(set(_CVE_RE.findall(full_text)))
-        if cves:
-            commit_url = (
-                f"{vcs_url.rstrip('/')}/commit/{current_sha}" if vcs_url else None
+        commit_url = (
+            f"{vcs_url.rstrip('/')}/commit/{current_sha}" if vcs_url else None
+        )
+        desc = (current_subject or "").strip()
+        if len(desc) > 500:
+            desc = desc[:497] + "..."
+        ptype = uSwidPatchType.SECURITY if cves else uSwidPatchType.BACKPORT
+        patches.append(
+            uSwidPatch(
+                type=ptype,
+                url=commit_url,
+                description=desc or None,
+                references=cves,
             )
-            patches.append(
-                uSwidPatch(
-                    type=uSwidPatchType.SECURITY,
-                    url=commit_url,
-                    description=current_subject[:200],
-                    references=cves,
-                )
-            )
+        )
         current_sha = current_subject = ""
         current_body_lines = []
 
@@ -474,25 +482,61 @@ def _scan_git_log_for_cves(
             _flush()
             continue
         if "\t" in line and not current_sha:
-            # First line of a new commit record: "HASH\tSubject"
             parts = line.split("\t", 1)
             current_sha = parts[0]
             current_subject = parts[1] if len(parts) > 1 else ""
-            total_commits += 1
         else:
             current_body_lines.append(line)
-    _flush()  # flush last record if separator was missing
+    _flush()
 
-    # Prepend the summary entry.
-    if total_commits > 0:
-        patches.insert(
-            0,
-            uSwidPatch(
-                type=uSwidPatchType.CHERRY_PICK,
-                description=f"{total_commits} commit(s) applied since {base_tag}",
-            ),
-        )
     return patches
+
+
+class TestSubmodulePatchEnumeration(unittest.TestCase):
+    """Per-commit pedigree patches from git log (no EDK2 checkout required)."""
+
+    def test_one_patch_per_commit_chronological(self):
+        from unittest import mock
+
+        fake_log = (
+            "aaa111111111111111111111111111111111111\tFirst fix after tag\n"
+            "\n"
+            "See also\n"
+            "---USWID_COMMIT_END---\n"
+            "bbb222222222222222222222222222222222222\tFix CVE-2024-9999 in parser\n"
+            "\n"
+            "details\n"
+            "---USWID_COMMIT_END---\n"
+            "ccc333333333333333333333333333333333333\tThird commit\n"
+            "---USWID_COMMIT_END---\n"
+        )
+        with mock.patch(
+            "uswid.test_edk2_integration._run_git", return_value=fake_log
+        ):
+            patches = _patches_for_commits_since_tag(
+                "/tmp", "v1.0", "https://github.com/o/r"
+            )
+        self.assertEqual(len(patches), 3)
+        self.assertEqual(patches[0].type, uSwidPatchType.BACKPORT)
+        self.assertEqual(patches[0].description, "First fix after tag")
+        self.assertEqual(
+            patches[0].url,
+            "https://github.com/o/r/commit/aaa111111111111111111111111111111111111",
+        )
+        self.assertEqual(patches[1].type, uSwidPatchType.SECURITY)
+        self.assertEqual(patches[1].description, "Fix CVE-2024-9999 in parser")
+        self.assertIn("CVE-2024-9999", patches[1].references)
+        self.assertEqual(patches[2].type, uSwidPatchType.BACKPORT)
+        self.assertEqual(patches[2].description, "Third commit")
+
+    def test_empty_log_returns_empty_list(self):
+        from unittest import mock
+
+        with mock.patch("uswid.test_edk2_integration._run_git", return_value=""):
+            self.assertEqual(
+                _patches_for_commits_since_tag("/x", "t", "https://github.com/o/r"),
+                [],
+            )
 
 
 def _parse_inf_submodule_refs(
@@ -643,7 +687,7 @@ def _make_submodule_components(
         # Pedigree: if commits were applied past the last tag, scan for CVEs.
         if patch_count > 0 and base_tag and os.path.isdir(sub_dir):
             vcs_url = url if url.startswith("http") else ""
-            for patch in _scan_git_log_for_cves(sub_dir, base_tag, vcs_url):
+            for patch in _patches_for_commits_since_tag(sub_dir, base_tag, vcs_url):
                 comp.add_patch(patch)
         elif commit_sha and base_tag is None:
             # Bare commit with no release baseline — record it as a single patch.

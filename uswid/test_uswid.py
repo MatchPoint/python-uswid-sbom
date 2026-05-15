@@ -596,7 +596,7 @@ class TestSwidEntity(unittest.TestCase):
             jsonstr,
             '{"type": "backport", '
             '"diff": {"url": "http://foo"}, '
-            '"resolves": [{"type": "security", "description": "foo", "references": ["foo", "bar", "baz"]}]}',
+            '"resolves": [{"type": "defect", "description": "foo", "references": ["foo", "bar", "baz"]}]}',
         )
 
         # CycloneDX import
@@ -605,6 +605,16 @@ class TestSwidEntity(unittest.TestCase):
         self.assertEqual(patch.url, patch2.url)
         self.assertEqual(patch.description, patch2.description)
         self.assertEqual(patch.references, patch2.references)
+
+        # SECURITY patch → Issue.type "security" in CycloneDX
+        sec = uSwidPatch(
+            type=uSwidPatchType.SECURITY,
+            url="http://bar",
+            description="memory safety",
+            references=["CVE-2025-1"],
+        )
+        sec_json = json.dumps(uSwidFormatCycloneDX()._save_patch(sec))  # type: ignore
+        self.assertIn('"type": "security"', sec_json)
 
         # INI export
         ini_save_patch = uSwidFormatIni()._save_patch(patch)
