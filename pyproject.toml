@@ -7,10 +7,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uswid"
-authors = [{name = "Richard Hughes", email = "richard@hughsie.com"}]
+authors = [
+    {name = "Richard Hughes", email = "richard@hughsie.com"},
+    {name = "Brian Mullen", email = "brian.desmond.mullen@gmail.com"},
+]
+maintainers = [{name = "UEFI SBOM Task (USBT) Working Group", email = "admin@uefi.org"}]
 license = "BSD-2-Clause-Patent"
 license-files = ["LICENSE"]
-keywords = ["swid", "sbom", "coswid"]
+keywords = ["swid", "sbom", "coswid", "uefi", "firmware", "cyclonedx", "spdx"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -18,7 +22,7 @@ classifiers = [
     "Topic :: Utilities",
     "Topic :: System :: Archiving",
 ]
-description = "A pure-python library for embedding CoSWID data"
+description = "A pure-python library for embedding CoSWID data, with UEFI SBOM Guidelines compliance extensions"
 readme = "README.md"
 dependencies = [
     "cbor2",
@@ -31,7 +35,9 @@ dynamic = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hughsie/python-uswid"
+Homepage = "https://github.com/MatchPoint/python-uswid-sbom"
+"Bug Tracker" = "https://github.com/MatchPoint/python-uswid-sbom/issues"
+"Upstream" = "https://github.com/hughsie/python-uswid"
 
 [project.scripts]
 uswid = "uswid.cli:main"
