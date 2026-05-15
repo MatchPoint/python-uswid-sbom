@@ -5,7 +5,7 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
-**0.7.0** (TBD — UEFI SBOM Guidelines compliance, EDK2 integration)
+**v0.1.0** (TBD — first release of the MatchPoint/python-uswid-sbom fork; UEFI SBOM Guidelines compliance, EDK2 integration)
 
  - Add ``uSwidComponent.is_primary`` field to designate the SBOM Primary Component per UEFI SBOM Guidelines §3.1.1.3; CycloneDX emits it as ``metadata.component``, SPDX emits a single ``Relationship: SPDXRef-DOCUMENT DESCRIBES`` (HP Development Company)
  - Add ``uSwidComponent.copyright`` field for copyright notices per UEFI SBOM Guidelines §3.1.11; CycloneDX emits ``component.copyright``, SPDX emits ``PackageCopyrightText`` (defaults to ``NOASSERTION``) (HP Development Company)
@@ -33,6 +33,15 @@ This library adheres to `Semantic Versioning <http://semver.org/>`_.
  - EDK2 integration: add ``_scan_git_log_for_cves()`` to scan ``git log <tag>..HEAD`` for CVE IDs (``CVE-YYYY-NNNNN``) in commit subjects and bodies; emits ``uSwidPatch`` entries of type ``security`` carrying the CVE IDs in ``resolves.references[]`` and a link to the commit URL, plus a summary entry noting total commit count (HP Development Company)
  - EDK2 integration: add ``_SUBMODULE_CPE_MAP`` — NVD-verified CPE vendor/product mappings for the six EDK2 submodules with confirmed NVD dictionary entries (openssl, mbedtls, jansson, oniguruma, brotli, libspdm); submodules without NVD entries remain PURL-only (HP Development Company)
  - Add ``test_normalize_submodule_version`` unit test covering all twelve EDK2 git-describe version patterns (HP Development Company)
+
+.. note::
+
+   The fork's own version stream begins at ``v0.1.0``.  All entries below
+   this line are inherited from the upstream `hughsie/python-uswid
+   <https://github.com/hughsie/python-uswid>`_ project and reflect that
+   project's release history, not this fork's.  See
+   ``docs/uefi/upstream_pr_notes.md`` (local-only) for the proposed
+   commit structure when these changes are submitted back to upstream.
 
 **0.6.0** (2025-03-16)
 
