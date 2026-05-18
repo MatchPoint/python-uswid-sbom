@@ -637,8 +637,8 @@ class TestSwidEntity(unittest.TestCase):
         self.assertEqual(ini_load_patch.references, patch.references)
 
     def test_normalize_submodule_version(self):
-        """Unit tests for _normalize_submodule_version (EDK2 submodule versioning)."""
-        from .test_edk2_integration import _normalize_submodule_version
+        """Unit tests for uswid.submodule.normalize_submodule_version."""
+        from .submodule import normalize_submodule_version
 
         cases = [
             # (raw,                              clean,    patches, has_sha, has_tag)
@@ -657,11 +657,245 @@ class TestSwidEntity(unittest.TestCase):
         ]
         for raw, exp_ver, exp_patches, exp_sha, exp_tag in cases:
             with self.subTest(raw=raw):
-                clean, patches, sha, tag = _normalize_submodule_version(raw)
+                clean, patches, sha, tag = normalize_submodule_version(raw)
                 self.assertEqual(clean, exp_ver, f"clean version mismatch for {raw!r}")
                 self.assertEqual(patches, exp_patches, f"patch count mismatch for {raw!r}")
                 self.assertEqual(sha is not None, exp_sha, f"sha presence mismatch for {raw!r}")
                 self.assertEqual(tag is not None, exp_tag, f"tag presence mismatch for {raw!r}")
+
+    def test_canonicalize_vcs_url(self):
+        """Unit tests for uswid.submodule.canonicalize_vcs_url."""
+        from .submodule import canonicalize_vcs_url
+
+        self.assertEqual(canonicalize_vcs_url(""), "")
+        self.assertEqual(
+            canonicalize_vcs_url("https://github.com/owner/repo"),
+            "https://github.com/owner/repo",
+        )
+        self.assertEqual(
+            canonicalize_vcs_url("HTTPS://GitHub.com/Owner/Repo.GIT"),
+            "https://github.com/owner/repo",
+        )
+        self.assertEqual(
+            canonicalize_vcs_url("https://github.com/o/r/"),
+            "https://github.com/o/r",
+        )
+        self.assertEqual(
+            canonicalize_vcs_url("https://github.com/o/r.git/"),
+            "https://github.com/o/r",
+        )
+
+    def test_submodule_url_aliases_resolves_org_rename(self):
+        """SUBMODULE_URL_ALIASES routes the Mbed-TLS rename to ARMmbed."""
+        from .submodule import (
+            SUBMODULE_URL_ALIASES,
+            canonicalize_vcs_url,
+            resolve_with_aliases,
+        )
+
+        # The alias dict itself uses canonicalised keys/values.
+        for key, value in SUBMODULE_URL_ALIASES.items():
+            self.assertEqual(
+                key,
+                canonicalize_vcs_url(key),
+                f"SUBMODULE_URL_ALIASES key {key!r} is not canonicalised",
+            )
+            self.assertEqual(
+                value,
+                canonicalize_vcs_url(value),
+                f"SUBMODULE_URL_ALIASES value {value!r} is not canonicalised",
+            )
+
+        # mbedtls org rename: Mbed-TLS -> ARMmbed
+        fake_map = {"https://github.com/armmbed/mbedtls": "/submodule/mbedtls"}
+        self.assertEqual(
+            resolve_with_aliases(
+                "https://github.com/Mbed-TLS/mbedtls", fake_map
+            ),
+            "/submodule/mbedtls",
+        )
+        # libfdt: dgibson/dtc -> devicetree-org/pylibfdt
+        fake_map = {
+            "https://github.com/devicetree-org/pylibfdt": "/submodule/libfdt"
+        }
+        self.assertEqual(
+            resolve_with_aliases(
+                "https://github.com/dgibson/dtc", fake_map
+            ),
+            "/submodule/libfdt",
+        )
+        # Direct hit (no alias needed)
+        fake_map = {"https://github.com/openssl/openssl": "/submodule/openssl"}
+        self.assertEqual(
+            resolve_with_aliases(
+                "https://github.com/openssl/openssl", fake_map
+            ),
+            "/submodule/openssl",
+        )
+        # Miss returns None
+        self.assertIsNone(
+            resolve_with_aliases(
+                "https://github.com/some/random", fake_map
+            )
+        )
+
+    def test_walk_gitmodules_recursive_first_write_wins(self):
+        """walk_gitmodules recurses and prefers the outermost URL on collisions."""
+        import tempfile
+        from .submodule import walk_gitmodules
+
+        with tempfile.TemporaryDirectory() as root:
+            # Build a fake project with one nested submodule, where the same
+            # URL appears at two depths. The outermost wins.
+            inner = os.path.join(root, "outer")
+            os.makedirs(inner)
+            with open(os.path.join(root, ".gitmodules"), "w", encoding="utf-8") as f:
+                f.write(
+                    '[submodule "outer"]\n'
+                    '    path = outer\n'
+                    '    url = https://github.com/foo/bar\n'
+                )
+            with open(os.path.join(inner, ".gitmodules"), "w", encoding="utf-8") as f:
+                f.write(
+                    '[submodule "nested-duplicate"]\n'
+                    '    path = nested-duplicate\n'
+                    '    url = https://github.com/foo/bar\n'
+                    '[submodule "nested-only"]\n'
+                    '    path = nested-only\n'
+                    '    url = https://github.com/baz/qux\n'
+                )
+            os.makedirs(os.path.join(inner, "nested-duplicate"))
+            os.makedirs(os.path.join(inner, "nested-only"))
+
+            urls = walk_gitmodules(root)
+
+            self.assertIn("https://github.com/foo/bar", urls)
+            self.assertIn("https://github.com/baz/qux", urls)
+
+            # First-write-wins on duplicates: the top-level "outer" entry must
+            # be picked, not the nested "nested-duplicate" one.
+            self.assertEqual(
+                os.path.normpath(urls["https://github.com/foo/bar"]),
+                os.path.normpath(os.path.join(root, "outer")),
+            )
+            # And nested-only is reachable only because recursion fired.
+            self.assertEqual(
+                os.path.normpath(urls["https://github.com/baz/qux"]),
+                os.path.normpath(os.path.join(inner, "nested-only")),
+            )
+
+            # Non-recursive walk drops the nested entry entirely.
+            top_only = walk_gitmodules(root, recursive=False)
+            self.assertIn("https://github.com/foo/bar", top_only)
+            self.assertNotIn("https://github.com/baz/qux", top_only)
+
+    def test_walk_gitmodules_url_normalisation(self):
+        """walk_gitmodules canonicalises URLs (lowercase, no trailing /, no .git)."""
+        import tempfile
+        from .submodule import walk_gitmodules
+
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, ".gitmodules"), "w", encoding="utf-8") as f:
+                f.write(
+                    '[submodule "ugly"]\n'
+                    '    path = ugly\n'
+                    '    url = HTTPS://GitHub.com/Foo/Bar.GIT/\n'
+                )
+            os.makedirs(os.path.join(root, "ugly"))
+            urls = walk_gitmodules(root)
+            self.assertEqual(set(urls.keys()), {"https://github.com/foo/bar"})
+
+    def test_walk_gitmodules_empty_input_no_crash(self):
+        """walk_gitmodules tolerates missing directories and empty .gitmodules."""
+        from .submodule import walk_gitmodules
+
+        self.assertEqual(walk_gitmodules("/does/not/exist"), {})
+        self.assertEqual(walk_gitmodules(""), {})
+
+    def test_submodule_cpe_map_entries(self):
+        """SUBMODULE_CPE_MAP contains the six confirmed-NVD entries."""
+        from .submodule import SUBMODULE_CPE_MAP
+
+        expected = {
+            "openssl/openssl": ("openssl", "openssl"),
+            "ARMmbed/mbedtls": ("*", "mbed_tls"),
+            "akheron/jansson": ("*", "jansson"),
+            "kkos/oniguruma": ("*", "oniguruma"),
+            "google/brotli": ("google", "brotli"),
+            "DMTF/libspdm": ("dmtf", "libspdm"),
+        }
+        for slug, expected_cpe in expected.items():
+            with self.subTest(slug=slug):
+                self.assertIn(slug, SUBMODULE_CPE_MAP)
+                self.assertEqual(SUBMODULE_CPE_MAP[slug], expected_cpe)
+
+    def test_patches_for_commits_since_tag_parses_separator_format(self):
+        """patches_for_commits_since_tag honours per-commit separator + CVE tagging."""
+        from unittest import mock
+        from .patch import uSwidPatchType
+        from .submodule import patches_for_commits_since_tag
+
+        fake_log = (
+            "aaa111111111111111111111111111111111111\tFirst fix after tag\n"
+            "\n"
+            "See also\n"
+            "---USWID_COMMIT_END---\n"
+            "bbb222222222222222222222222222222222222\tFix CVE-2024-9999 in parser\n"
+            "\n"
+            "details\n"
+            "---USWID_COMMIT_END---\n"
+            "ccc333333333333333333333333333333333333\tThird commit\n"
+            "---USWID_COMMIT_END---\n"
+        )
+        with mock.patch(
+            "uswid.submodule._run_git", return_value=fake_log
+        ):
+            patches = patches_for_commits_since_tag(
+                "/tmp", "v1.0", "https://github.com/o/r"
+            )
+        self.assertEqual(len(patches), 3)
+        self.assertEqual(patches[0].type, uSwidPatchType.BACKPORT)
+        self.assertEqual(patches[0].description, "First fix after tag")
+        self.assertEqual(
+            patches[0].url,
+            "https://github.com/o/r/commit/aaa111111111111111111111111111111111111",
+        )
+        self.assertEqual(patches[1].type, uSwidPatchType.SECURITY)
+        self.assertEqual(patches[1].description, "Fix CVE-2024-9999 in parser")
+        self.assertIn("CVE-2024-9999", patches[1].references)
+        self.assertEqual(patches[2].type, uSwidPatchType.BACKPORT)
+
+    def test_patches_for_commits_since_tag_empty_log(self):
+        """patches_for_commits_since_tag returns [] when git log is empty."""
+        from unittest import mock
+        from .submodule import patches_for_commits_since_tag
+
+        with mock.patch("uswid.submodule._run_git", return_value=""):
+            self.assertEqual(
+                patches_for_commits_since_tag(
+                    "/x", "t", "https://github.com/o/r"
+                ),
+                [],
+            )
+
+    def test_edk2_tag_pattern(self):
+        """EDK2_TAG_PATTERN matches edk2-stable<YYYYMM>(-N-gHASH)? shapes."""
+        from .edk2 import EDK2_TAG_PATTERN
+
+        m = EDK2_TAG_PATTERN.match("edk2-stable202602")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("tag"), "edk2-stable202602")
+        self.assertIsNone(m.group("dist"))
+
+        m = EDK2_TAG_PATTERN.match("edk2-stable202602-196-g0fe6b755f2")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("tag"), "edk2-stable202602")
+        self.assertEqual(m.group("dist"), "196")
+        self.assertEqual(m.group("sha"), "0fe6b755f2")
+
+        # Non-EDK II strings don't match.
+        self.assertIsNone(EDK2_TAG_PATTERN.match("v1.2.3"))
+        self.assertIsNone(EDK2_TAG_PATTERN.match("edk2-stableABC"))
 
     def test_component_purl(self):
         """Unit tests for uSwidComponent, PURL specific"""

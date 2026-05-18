@@ -333,6 +333,23 @@ def main():
             "firmware-type component, else the first component."
         ),
     )
+    parser.add_argument(
+        "--primary-dir",
+        dest="primary_dir",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Source-tree root of the primary component. When set, uswid walks "
+            "DIR/.gitmodules recursively, re-merges any --fallback-path SBOM "
+            "templates against the matching submodule's actual directory "
+            "(so @VCS_*@ placeholders resolve to each submodule's git state), "
+            "drops orphan templates with no matching submodule, and synthesises "
+            "minimal CycloneDX components for submodules that have no curated "
+            "template. The resulting components feed into --fixup's containment-"
+            "based dependency wiring to produce a complete CycloneDX dependencies[] "
+            "tree per UEFI SBOM Guidelines §3.1.9."
+        ),
+    )
     args = parser.parse_args()
     load_filepaths = args.load
     if not load_filepaths:
@@ -367,6 +384,7 @@ def main():
         "bom.json",
         "bom.coswid",
         "sbom.ini",
+        "inf",
     ]
     fallback_dirpaths: List[str] = []
     for path in args.find:
@@ -470,6 +488,111 @@ def main():
         except NotSupportedError as e:
             print(e)
             sys.exit(1)
+
+    # --primary-dir: resolve fallback templates against the primary's
+    # .gitmodules tree, drop orphans, synthesise any missing submodule
+    # components, and anchor source_dir on every component so the --fixup
+    # block below can wire a complete CycloneDX dependencies[] tree.
+    # See uswid.submodule for the generic helpers; nothing project-specific
+    # lives in this block.
+    if args.primary_dir:
+        from uswid.submodule import (
+            SUBMODULE_URL_ALIASES,
+            canonicalize_vcs_url,
+            make_submodule_components,
+            resolve_submodule_vcs,
+            resolve_with_aliases,
+            walk_gitmodules,
+        )
+
+        if not os.path.isdir(args.primary_dir):
+            print(f"--primary-dir {args.primary_dir!r} is not a directory")
+            sys.exit(1)
+
+        primary_dir_abs = os.path.realpath(args.primary_dir)
+        url_to_path = walk_gitmodules(primary_dir_abs)
+
+        # Identify the primary candidate: --primary if given, else the first
+        # already-loaded component. Used as the parent for synthesised
+        # submodule components and as the anchor for source_dir.
+        primary_component: Optional[uSwidComponent] = None
+        if args.primary_tag_id:
+            for c in container:
+                candidates = {c.tag_id, c.cpe}
+                if c.purl:
+                    candidates.add(str(c.purl))
+                if args.primary_tag_id in candidates:
+                    primary_component = c
+                    break
+        if primary_component is None:
+            primary_component = next(iter(container), None)
+        if primary_component is not None:
+            primary_component.source_dir = primary_dir_abs
+
+        # Re-merge each fallback template against its matching submodule
+        # directory so @VCS_*@ placeholders resolve against the submodule's
+        # git state rather than the fallback file's parent directory.
+        matched_sub_dirs: set = set()
+        for fb_comp in list(container_fallback):
+            fb_url: Optional[str] = None
+            for link in fb_comp.links:
+                if link.href and link.href.startswith(("http://", "https://")):
+                    if resolve_with_aliases(
+                        link.href, url_to_path, SUBMODULE_URL_ALIASES
+                    ):
+                        fb_url = link.href
+                        break
+            if not fb_url:
+                continue
+            sub_dir = resolve_with_aliases(fb_url, url_to_path, SUBMODULE_URL_ALIASES)
+            if not sub_dir or not os.path.isdir(sub_dir):
+                continue
+            if not fb_comp.source_filenames:
+                continue
+            filepath = fb_comp.source_filenames[0]
+            base = _detect_format(filepath)
+            if not base:
+                continue
+            base.verbose = args.verbose
+            _container_merge_from_filepath(
+                container, base, filepath, dirpath=sub_dir, fixup=args.fixup
+            )
+            matched_sub_dirs.add(os.path.normpath(sub_dir))
+
+            # uSwidVcs.get_version() returns the raw `git describe` output
+            # (e.g. ``openssl-3.5.1``); normalise it to the NVD-CPE form so
+            # downstream CVE lookups can match. Also anchor source_dir to the
+            # actual submodule directory for the --fixup containment loop.
+            canon_url = canonicalize_vcs_url(fb_url)
+            for c in container:
+                if any(
+                    link.href and canonicalize_vcs_url(link.href) == canon_url
+                    for link in c.links
+                ):
+                    clean, _, _, _ = resolve_submodule_vcs(sub_dir)
+                    if clean and clean != "NOASSERTION":
+                        c.software_version = clean
+                    c.source_dir = sub_dir
+                    break
+
+        # Synthesise minimal components for submodules with no curated
+        # fallback template (so every .gitmodules entry produces at least one
+        # SBOM component). make_submodule_components also adds parent->child
+        # COMPONENT links, materialising the §3.1.9 dependency from the
+        # primary to each submodule.
+        if primary_component is not None:
+            synth_components, synth_dir_to_tag = make_submodule_components(
+                primary_dir_abs, primary_component
+            )
+            tag_to_dir = {tag: d for d, tag in synth_dir_to_tag.items()}
+            for comp in synth_components:
+                comp_sub_dir = tag_to_dir.get(comp.tag_id)
+                if comp_sub_dir is None:
+                    continue
+                if os.path.normpath(comp_sub_dir) in matched_sub_dirs:
+                    continue
+                comp.source_dir = comp_sub_dir
+                container.append(comp)
 
     # auto-add deps using the top-level project paths
     if args.fixup:

@@ -66,45 +66,27 @@ from typing import Dict, List, Optional, Tuple
 
 from .component import uSwidComponent, uSwidComponentType
 from .container import uSwidContainer
+from .edk2 import (
+    EDK2_FULL_MODE_SUBMODULE_HINTS as _FULL_MODE_SUBMODULE_HINTS,
+    EDK2_LIGHT_MODE_EXCLUDE as _LIGHT_MODE_EXCLUDE,
+    EDK2_LIGHT_MODE_PACKAGES as _LIGHT_MODE_PACKAGES,
+    describe_edk2_version,
+)
 from .entity import uSwidEntity, uSwidEntityRole
 from .errors import NotSupportedError
 from .format_cyclonedx import uSwidFormatCycloneDX
 from .format_inf import uSwidFormatInf
 from .link import uSwidLink, uSwidLinkRel
-from .patch import uSwidPatch, uSwidPatchType
 from .purl import uSwidPurl
+from .submodule import (
+    make_submodule_components,
+    parse_gitmodules_file,
+)
 
 _REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 _DEFAULT_REF = "edk2-stable202411"
 _PARENT_FIXTURE = os.path.join(_REPO_ROOT, "tests", "edk2", "sbom.cdx.json")
 _CACHE_ROOT = os.path.join(_REPO_ROOT, "tests", "_edk2_cache")
-
-# Submodule-bearing paths that uSwidFormatInf.load() chokes on in light mode
-# (it opens every entry in [Sources] to compute a hash, and missing submodule
-# files raise FileNotFoundError). These match the modules that explicitly pull
-# in C source under MdePkg/Library/BaseFdtLib/, BrotliCustomDecompressLib, etc.
-_LIGHT_MODE_EXCLUDE = (
-    "MdePkg/Library/BaseFdtLib/",
-    "MdePkg/Library/MipiSysTLib/",
-    "MdeModulePkg/Library/BrotliCustomDecompressLib/",
-    "MdeModulePkg/Universal/RegularExpressionDxe/",
-)
-# Curated packages walked in light mode (kept narrow so the run finishes fast
-# and so we don't trip on submodule-dependent inf files).
-_LIGHT_MODE_PACKAGES = ("MdePkg", "MdeModulePkg", "ShellPkg")
-
-# In full mode we additionally assert these submodule-bearing locations
-# produced at least one component, proving that submodule coverage worked.
-_FULL_MODE_SUBMODULE_HINTS = (
-    "openssl",
-    "mbedtls",
-    "brotli",
-    "oniguruma",
-    "libfdt",
-    "mipisyst",
-    "jansson",
-    "libspdm",
-)
 
 
 def _have_git() -> bool:
@@ -138,10 +120,13 @@ def _submodules_populated(edk2_dir: str) -> bool:
     gitmodules = os.path.join(edk2_dir, ".gitmodules")
     if not os.path.isfile(gitmodules):
         return False
-    paths = _parse_gitmodules(gitmodules)
-    if not paths:
+    fields_by_name = parse_gitmodules_file(gitmodules)
+    if not fields_by_name:
         return False
-    for relpath in paths.values():
+    for fields in fields_by_name.values():
+        relpath = fields.get("path")
+        if not relpath:
+            continue
         full = os.path.join(edk2_dir, relpath)
         if not os.path.isdir(full):
             return False
@@ -151,82 +136,6 @@ def _submodules_populated(edk2_dir: str) -> bool:
         except OSError:
             return False
     return True
-
-
-def _parse_gitmodules(gitmodules_path: str) -> Dict[str, str]:
-    """Return ``{submodule_name: relative_path}`` from a ``.gitmodules`` file."""
-    result: Dict[str, str] = {}
-    current: Optional[str] = None
-    name_re = re.compile(r'^\s*\[submodule\s+"([^"]+)"\]\s*$')
-    path_re = re.compile(r"^\s*path\s*=\s*(\S+)\s*$")
-    try:
-        with open(gitmodules_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                m = name_re.match(line)
-                if m:
-                    current = m.group(1)
-                    continue
-                m = path_re.match(line)
-                if m and current:
-                    result[current] = m.group(1)
-    except OSError:
-        return {}
-    return result
-
-
-def _parse_gitmodules_full(gitmodules_path: str) -> Dict[str, Dict[str, str]]:
-    """Return ``{submodule_name: {key: value, ...}}`` (includes path + url)."""
-    result: Dict[str, Dict[str, str]] = {}
-    current: Optional[str] = None
-    name_re = re.compile(r'^\s*\[submodule\s+"([^"]+)"\]\s*$')
-    kv_re = re.compile(r"^\s*(\w+)\s*=\s*(\S+.*?)\s*$")
-    try:
-        with open(gitmodules_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                m = name_re.match(line)
-                if m:
-                    current = m.group(1)
-                    result[current] = {}
-                    continue
-                if not current:
-                    continue
-                m = kv_re.match(line)
-                if m:
-                    result[current][m.group(1).strip()] = m.group(2).strip()
-    except OSError:
-        return {}
-    return result
-
-
-def _describe_edk2(edk2_dir: str) -> Tuple[str, str, str]:
-    """Return ``(version_label, purl_version, cpe_version)`` for ``edk2_dir``.
-
-    ``git describe --tags --always`` yields something like
-    ``edk2-stable202602-196-g0fe6b755f2`` for a non-tag-exact commit. We convert it
-    to a UEFI SBOM Guidelines-friendly version label (``edk2-stable202602+196.g…``)
-    so the CycloneDX writer can render coherent ``purl`` / ``cpe`` strings while
-    still pointing at the actual checkout.
-    """
-    describe = _run_git(["describe", "--tags", "--always"], cwd=edk2_dir)
-    # match e.g. edk2-stable202602-196-g0fe6b755f2
-    m = re.match(
-        r"^(?P<tag>edk2-stable\d+)(?:-(?P<dist>\d+)-g(?P<sha>[0-9a-f]+))?$",
-        describe,
-    )
-    if m and m.group("dist"):
-        tag, dist, sha = m.group("tag"), m.group("dist"), m.group("sha")
-        version_label = f"{tag}+{dist}.g{sha}"
-        # purl/cpe should use the year-month suffix from the tag (e.g. "202602")
-        m2 = re.search(r"(\d+)$", tag)
-        short = m2.group(1) if m2 else tag
-        return version_label, short, short
-    if m:
-        tag = m.group("tag")
-        m2 = re.search(r"(\d+)$", tag)
-        short = m2.group(1) if m2 else tag
-        return tag, short, short
-    # opaque sha
-    return describe, describe, describe
 
 
 def _clone_edk2(ref: str, dest: str, full_mode: bool) -> None:
@@ -327,216 +236,18 @@ def _build_per_inf_container(
 
 
 # ---------------------------------------------------------------------------
-# Submodule versioning and CPE helpers
+# INF file parsing helpers for submodule source-reference detection.
+# (Generic submodule versioning + CPE handling moved to uswid.submodule;
+# EDK II tag parsing moved to uswid.edk2 — see imports at the top of this
+# file. The remaining helper below is .inf-format-specific and is kept
+# alongside the integration test for now; future work may promote it to
+# uswid.edk2 as part of a larger EDK II plugin split.)
 # ---------------------------------------------------------------------------
 
-# NVD CPE dictionary entries for known EDK2 submodules.
-# Keyed by the GitHub "owner/repo" fragment from the submodule URL.
-# Only packages with confirmed NVD entries are listed; others stay PURL-only.
-# Verified against NVD CPE dictionary May 2026.
-_SUBMODULE_CPE_MAP: Dict[str, Tuple[str, str]] = {
-    # vendor field is position-4 in CPE 2.3 (company name, not CPU architecture).
-    # mbedTLS is published by Arm Ltd but NVD has also attributed it to
-    # trustedfirmware and mbed.  Using wildcard (*) avoids false negatives when
-    # NVD reclassifies the vendor while keeping the product name precise.
-    "openssl/openssl":  ("openssl",  "openssl"),
-    "ARMmbed/mbedtls":  ("*",        "mbed_tls"),
-    "akheron/jansson":  ("*",        "jansson"),
-    "kkos/oniguruma":   ("*",        "oniguruma"),
-    "google/brotli":    ("google",   "brotli"),
-    "DMTF/libspdm":     ("dmtf",    "libspdm"),
-}
-
-# Regex to extract the git-describe patch suffix: -N-gHASH at end of string.
-_GIT_DESCRIBE_SUFFIX_RE = re.compile(r"-(\d+)-g([0-9a-f]+)$")
-# Regex to strip a project-name suffix added by the downstream fork (e.g. +edk2).
-_PROJECT_SUFFIX_RE = re.compile(r"[+][a-zA-Z0-9_-]+$")
-# Bare commit hash (7-40 hex chars, no dots or dashes).
-_BARE_COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
-# CVE identifier pattern.
-_CVE_RE = re.compile(r"\bCVE-\d{4}-\d+\b", re.IGNORECASE)
-# INF file parsing helpers for submodule source-reference detection.
 # Matches "DEFINE VAR = value" lines inside an [Defines] section.
 _INF_DEFINE_RE = re.compile(r"^\s*DEFINE\s+(\w+)\s*=\s*(\S.*?)\s*$", re.IGNORECASE)
 # Matches section headers such as [Defines], [Sources], [Sources.X64].
 _INF_SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-
-
-def _normalize_submodule_version(raw: str) -> Tuple[str, int, Optional[str], Optional[str]]:
-    """Normalize a raw ``git describe`` string into (clean_version, patch_count,
-    commit_sha, base_tag).
-
-    * ``clean_version`` — semantic version suitable for a CPE/NVD lookup
-      (``v``/``V`` and project-name prefixes stripped, ``+project`` suffixes
-      removed, git-describe commit suffix removed).
-    * ``patch_count`` — number of commits applied on top of the last tag.
-    * ``commit_sha``  — short commit hash when past-tag commits exist, or the
-      bare hash itself when no tag is present, else ``None``.
-    * ``base_tag``    — the raw tag string as it appears in the git repo (used
-      to scope a ``git log <base_tag>..HEAD`` CVE scan); ``None`` for bare
-      commits.
-
-    Examples::
-
-        "openssl-3.5.1"             → ("3.5.1",  0,   None,     "openssl-3.5.1")
-        "v3.6.5"                    → ("3.6.5",  0,   None,     "v3.6.5")
-        "v1.2.0-1-ge230f47"         → ("1.2.0",  1,   "e230f47","v1.2.0")
-        "release-1.11.0-238-g86a"   → ("1.11.0", 238, "86a",    "release-1.11.0")
-        "cmocka-1.1.5-23-g1cc9cde"  → ("1.1.5",  23,  "1cc9cde","cmocka-1.1.5")
-        "v1.1+edk2"                 → ("1.1",    0,   None,     "v1.1")
-        "V184"                      → ("184",    0,   None,     "V184")
-        "3.7.0"                     → ("3.7.0",  0,   None,     "3.7.0")
-        "83d4e1e"                   → ("0.0.0",  0,   "83d4e1e", None)
-    """
-    raw = raw.strip()
-
-    # Bare commit hash — no release baseline.
-    if _BARE_COMMIT_RE.match(raw):
-        return "0.0.0", 0, raw, None
-
-    # Step 1: peel off git-describe patch suffix (-N-gHASH).
-    patch_count = 0
-    commit_sha: Optional[str] = None
-    m = _GIT_DESCRIBE_SUFFIX_RE.search(raw)
-    if m:
-        patch_count = int(m.group(1))
-        commit_sha = m.group(2)
-        raw = raw[: m.start()]          # e.g. "v1.2.0" or "cmocka-1.1.5"
-
-    # Step 2: remove downstream project suffix (e.g. "+edk2").
-    raw = _PROJECT_SUFFIX_RE.sub("", raw)
-
-    # base_tag is what remains — the actual tag name in the git repo.
-    base_tag: Optional[str] = raw
-
-    # Step 3: extract the clean version number (first digit-led portion).
-    vm = re.search(r"(\d[\d.]*)", raw)
-    if not vm:
-        return "0.0.0", patch_count, commit_sha, base_tag
-
-    clean_version = vm.group(1).rstrip(".")
-    return clean_version, patch_count, commit_sha, base_tag
-
-
-def _patches_for_commits_since_tag(
-    cwd: str, base_tag: str, vcs_url: str
-) -> List[uSwidPatch]:
-    """Return one :class:`uSwidPatch` per commit in ``base_tag..HEAD`` (oldest first).
-
-    Supply-chain reviewers expect each post-release commit to be listed
-    individually in ``pedigree.patches[]``, not a single roll-up message.
-
-    * **BACKPORT** — normal commits after the tag (subject line as ``description``).
-    * **SECURITY** — same, when the commit message references one or more
-      ``CVE-YYYY-NNNN`` IDs; those IDs are listed in ``references``.
-
-    Each patch carries a VCS commit URL when *vcs_url* is an ``http(s)`` URL.
-    Parsing uses ``git log <base_tag>..HEAD --reverse --no-merges`` with a
-    separator record format so multi-line bodies are unambiguous.
-    """
-    _SEP = "---USWID_COMMIT_END---"
-    try:
-        raw_log = _run_git(
-            [
-                "log",
-                f"{base_tag}..HEAD",
-                "--no-merges",
-                "--reverse",
-                f"--format=%H%x09%s%n%b%n{_SEP}",
-            ],
-            cwd=cwd,
-        )
-    except subprocess.CalledProcessError:
-        return []
-
-    patches: List[uSwidPatch] = []
-    current_sha = current_subject = ""
-    current_body_lines: List[str] = []
-
-    def _flush() -> None:
-        nonlocal current_sha, current_subject, current_body_lines
-        if not current_sha:
-            return
-        full_text = current_subject + " " + " ".join(current_body_lines)
-        cves = sorted(set(_CVE_RE.findall(full_text)))
-        commit_url = (
-            f"{vcs_url.rstrip('/')}/commit/{current_sha}" if vcs_url else None
-        )
-        desc = (current_subject or "").strip()
-        if len(desc) > 500:
-            desc = desc[:497] + "..."
-        ptype = uSwidPatchType.SECURITY if cves else uSwidPatchType.BACKPORT
-        patches.append(
-            uSwidPatch(
-                type=ptype,
-                url=commit_url,
-                description=desc or None,
-                references=cves,
-            )
-        )
-        current_sha = current_subject = ""
-        current_body_lines = []
-
-    for line in raw_log.splitlines():
-        if line == _SEP:
-            _flush()
-            continue
-        if "\t" in line and not current_sha:
-            parts = line.split("\t", 1)
-            current_sha = parts[0]
-            current_subject = parts[1] if len(parts) > 1 else ""
-        else:
-            current_body_lines.append(line)
-    _flush()
-
-    return patches
-
-
-class TestSubmodulePatchEnumeration(unittest.TestCase):
-    """Per-commit pedigree patches from git log (no EDK2 checkout required)."""
-
-    def test_one_patch_per_commit_chronological(self):
-        from unittest import mock
-
-        fake_log = (
-            "aaa111111111111111111111111111111111111\tFirst fix after tag\n"
-            "\n"
-            "See also\n"
-            "---USWID_COMMIT_END---\n"
-            "bbb222222222222222222222222222222222222\tFix CVE-2024-9999 in parser\n"
-            "\n"
-            "details\n"
-            "---USWID_COMMIT_END---\n"
-            "ccc333333333333333333333333333333333333\tThird commit\n"
-            "---USWID_COMMIT_END---\n"
-        )
-        with mock.patch(
-            "uswid.test_edk2_integration._run_git", return_value=fake_log
-        ):
-            patches = _patches_for_commits_since_tag(
-                "/tmp", "v1.0", "https://github.com/o/r"
-            )
-        self.assertEqual(len(patches), 3)
-        self.assertEqual(patches[0].type, uSwidPatchType.BACKPORT)
-        self.assertEqual(patches[0].description, "First fix after tag")
-        self.assertEqual(
-            patches[0].url,
-            "https://github.com/o/r/commit/aaa111111111111111111111111111111111111",
-        )
-        self.assertEqual(patches[1].type, uSwidPatchType.SECURITY)
-        self.assertEqual(patches[1].description, "Fix CVE-2024-9999 in parser")
-        self.assertIn("CVE-2024-9999", patches[1].references)
-        self.assertEqual(patches[2].type, uSwidPatchType.BACKPORT)
-        self.assertEqual(patches[2].description, "Third commit")
-
-    def test_empty_log_returns_empty_list(self):
-        from unittest import mock
-
-        with mock.patch("uswid.test_edk2_integration._run_git", return_value=""):
-            self.assertEqual(
-                _patches_for_commits_since_tag("/x", "t", "https://github.com/o/r"),
-                [],
-            )
 
 
 def _parse_inf_submodule_refs(
@@ -613,99 +324,6 @@ def _parse_inf_submodule_refs(
     return list(found)
 
 
-def _make_submodule_components(
-    edk2_dir: str, parent: uSwidComponent
-) -> Tuple[List[uSwidComponent], Dict[str, str]]:
-    """Per UEFI Guidelines §2.3.1, materialise ``.gitmodules`` as components.
-
-    Each populated submodule becomes a ``uSwidComponent`` linked under the parent
-    EDK2 component via ``uSwidLinkRel.COMPONENT``. ``software_version`` is
-    discovered with ``git describe`` inside the submodule when possible.
-
-    Returns ``(components, submodule_dir_to_tag)`` where *submodule_dir_to_tag*
-    maps each absolute submodule directory path to its component ``tag_id``.
-    That map is used by the caller to wire INF wrapper components to the
-    submodule components they directly incorporate via ``dependsOn``.
-    """
-    gitmodules = os.path.join(edk2_dir, ".gitmodules")
-    if not os.path.isfile(gitmodules):
-        return [], {}
-    submodules: List[uSwidComponent] = []
-    dir_to_tag: Dict[str, str] = {}
-    for name, fields in _parse_gitmodules_full(gitmodules).items():
-        rel_path = fields.get("path")
-        url = fields.get("url") or ""
-        if not rel_path:
-            continue
-        sub_dir = os.path.join(edk2_dir, rel_path)
-        if not os.path.isdir(sub_dir):
-            continue
-        try:
-            sub_sha = _run_git(["rev-parse", "HEAD"], cwd=sub_dir)
-        except subprocess.CalledProcessError:
-            continue
-        try:
-            raw_version = _run_git(["describe", "--tags", "--always"], cwd=sub_dir)
-        except subprocess.CalledProcessError:
-            raw_version = sub_sha[:12]
-
-        clean_version, patch_count, commit_sha, base_tag = (
-            _normalize_submodule_version(raw_version)
-        )
-
-        # derive a stable purl-ish tag_id from the submodule URL when possible
-        m = re.search(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)", url)
-        github_slug: Optional[str] = None
-        if m:
-            github_slug = f"{m.group('owner')}/{m.group('repo')}"
-            tag_id = f"pkg:github/{github_slug}@{sub_sha}"
-            supplier_name = m.group("owner")
-        else:
-            tag_id = f"pkg:edk2-submodule/{rel_path}@{sub_sha}"
-            supplier_name = "NOASSERTION"
-
-        comp = uSwidComponent()
-        comp.tag_id = tag_id
-        comp.software_name = os.path.basename(rel_path)
-        comp.software_version = clean_version
-        comp.type = uSwidComponentType.LIBRARY
-
-        # Assign a CPE when this submodule has a known NVD entry.
-        if github_slug:
-            cpe_entry = _SUBMODULE_CPE_MAP.get(github_slug)
-            if cpe_entry:
-                cpe_vendor, cpe_product = cpe_entry
-                comp.cpe = (
-                    f"cpe:2.3:a:{cpe_vendor}:{cpe_product}"
-                    f":{clean_version}:*:*:*:*:*:*:*"
-                )
-
-        comp.add_entity(
-            uSwidEntity(name=supplier_name, roles=[uSwidEntityRole.SOFTWARE_CREATOR])
-        )
-
-        # Pedigree: if commits were applied past the last tag, scan for CVEs.
-        if patch_count > 0 and base_tag and os.path.isdir(sub_dir):
-            vcs_url = url if url.startswith("http") else ""
-            for patch in _patches_for_commits_since_tag(sub_dir, base_tag, vcs_url):
-                comp.add_patch(patch)
-        elif commit_sha and base_tag is None:
-            # Bare commit with no release baseline — record it as a single patch.
-            comp.add_patch(
-                uSwidPatch(
-                    type=uSwidPatchType.CHERRY_PICK,
-                    description=f"No release tag found; pinned at commit {commit_sha}",
-                )
-            )
-
-        if url:
-            comp.add_link(uSwidLink(rel=uSwidLinkRel.SEE_ALSO, href=url))
-        parent.add_link(uSwidLink(rel=uSwidLinkRel.COMPONENT, href=comp.tag_id))
-        dir_to_tag[os.path.normpath(sub_dir)] = tag_id
-        submodules.append(comp)
-    return submodules, dir_to_tag
-
-
 class TestEdk2IntegrationSbom(unittest.TestCase):
     """Replicates the SBOM4EDK2 pipeline as a uSWID end-to-end test."""
 
@@ -726,7 +344,7 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
         if edk2_dir and _looks_like_edk2_tree(edk2_dir):
             cls.edk2_dir = os.path.realpath(edk2_dir)
             try:
-                version_label, purl_v, cpe_v = _describe_edk2(cls.edk2_dir)
+                version_label, purl_v, cpe_v = describe_edk2_version(cls.edk2_dir)
             except subprocess.CalledProcessError:
                 version_label, purl_v, cpe_v = "NOASSERTION", "NOASSERTION", "NOASSERTION"
             cls.version_label = version_label
@@ -882,7 +500,7 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
         submodule_dir_to_tag: Dict[str, str] = {}
         if self.mode == "full":
             primary = next(c for c in merged if c.is_primary)
-            sub_comps, submodule_dir_to_tag = _make_submodule_components(
+            sub_comps, submodule_dir_to_tag = make_submodule_components(
                 self.edk2_dir, primary
             )
             for sub in sub_comps:
@@ -1045,6 +663,113 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
                 f"full mode produced no recognisable submodule components; "
                 f"checked for {_FULL_MODE_SUBMODULE_HINTS}, got {sorted(sub_names)[:20]}…",
             )
+
+    def test_primary_dir_cli_end_to_end(self) -> None:
+        """End-to-end exercise of the ``uswid --primary-dir`` CLI flag.
+
+        This is the integration smoke test for Phase 2b: invoking the CLI
+        with the new flag against a real EDK II checkout must produce a
+        CycloneDX SBOM that is:
+
+        * non-empty (``components[]`` populated),
+        * placeholder-free (no surviving ``@VCS_*@`` substrings — orphan
+          fallback templates must have been dropped, matched ones must have
+          had their placeholders resolved against the submodule's git),
+        * structurally complete (``dependencies[]`` present, primary has
+          at least one ``dependsOn`` entry).
+
+        The fallback path is optional: when the running developer has a
+        local uswid-data clone we point at it, otherwise we still run the
+        flag against the EDK II tree alone (synthesised submodule
+        components only). Either way the assertions above must hold.
+        """
+        out_path = os.path.join(self.cache_dir, "edk2.primary-dir-cli.cdx.json")
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+        # The primary fixture's bom-ref is static (matching the upstream-published
+        # tag at the time the fixture was authored). Match against it directly
+        # rather than self.purl_version, which is computed from the running
+        # checkout's git describe and may be newer than the fixture.
+        with open(_PARENT_FIXTURE, "rb") as f:
+            fixture = json.load(f)
+        fixture_bom_ref = fixture["components"][0]["bom-ref"]
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "uswid.cli",
+            "--load",
+            _PARENT_FIXTURE,
+            "--primary-dir",
+            self.edk2_dir,
+            "--primary",
+            fixture_bom_ref,
+            "--fixup",
+            "--save",
+            out_path,
+            "--format",
+            "cyclonedx",
+        ]
+
+        # Opt-in to a uswid-data fallback path if the environment supplies one;
+        # this is what real users will pass when they have curated templates.
+        fallback_path = os.environ.get("USWID_DATA_DIR")
+        if fallback_path and os.path.isdir(fallback_path):
+            cmd += ["--fallback-path", fallback_path]
+
+        try:
+            subprocess.check_output(
+                cmd, stderr=subprocess.STDOUT, cwd=_REPO_ROOT, timeout=600
+            )
+        except subprocess.CalledProcessError as exc:
+            self.fail(
+                f"uswid --primary-dir invocation failed (rc={exc.returncode}):\n"
+                f"{exc.output.decode('utf-8', errors='replace')[:4000]}"
+            )
+
+        self.assertTrue(
+            os.path.isfile(out_path),
+            f"uswid did not write output to {out_path!r}",
+        )
+
+        with open(out_path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+
+        self.assertEqual(data["bomFormat"], "CycloneDX")
+        self.assertIn("component", data.get("metadata", {}))
+        primary = data["metadata"]["component"]
+        self.assertEqual(primary["name"], "EDK II")
+
+        components = data.get("components") or []
+        self.assertGreater(
+            len(components), 0, "--primary-dir produced no components"
+        )
+
+        # No component should carry an unresolved @VCS_*@ placeholder; the
+        # orphan-template filter and per-submodule VCS substitution must
+        # have eliminated every one.
+        leftover = [
+            c for c in components if any(
+                "@VCS_" in str(v) for v in c.values() if isinstance(v, str)
+            )
+        ]
+        self.assertEqual(
+            leftover,
+            [],
+            f"{len(leftover)} components retain @VCS_*@ placeholders: "
+            f"{[c.get('name') for c in leftover[:5]]}",
+        )
+
+        deps = data.get("dependencies") or []
+        self.assertTrue(deps, "merged SBOM has no dependencies[]")
+        primary_ref = primary["bom-ref"]
+        primary_dep_entries = [d for d in deps if d.get("ref") == primary_ref]
+        self.assertTrue(
+            primary_dep_entries,
+            f"no dependencies[] entry for the primary bom-ref {primary_ref!r}",
+        )
+        self.assertTrue(primary_dep_entries[0]["dependsOn"])
 
 
 if __name__ == "__main__":
