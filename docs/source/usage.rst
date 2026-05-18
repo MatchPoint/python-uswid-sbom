@@ -71,3 +71,11 @@ Saving all three to an XML SWID file:
     with open(filename, "rw") as f:
         f.write(uSwidFormatSwid().save(uSwidContainer([component])))
 
+
+Git submodules (library API)
+---------------------------
+
+This fork adds :mod:`uswid.submodule` for working with ``.gitmodules`` trees in a project-agnostic way: URL canonicalisation, recursive walks, ``git describe`` normalisation for NVD/CPE-friendly versions, and building :class:`uswid.component.uSwidComponent` instances for each submodule. EDK II–specific helpers and package lists are in :mod:`uswid.edk2`.
+
+See :doc:`versionhistory` (v0.2.0) for the CLI flag ``--primary-dir``, which re-merges ``--fallback-path`` templates against submodule checkouts and prepares a container for ``--fixup``.
+

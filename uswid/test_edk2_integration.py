@@ -10,12 +10,13 @@
 """End-to-end EDK2 SBOM integration test (SBOM4EDK2 parity).
 
 This test exercises ``uswid``'s CycloneDX writer against a real EDK II source tree.
-It mirrors what `MatchPoint/SBOM4EDK2 <https://github.com/MatchPoint/SBOM4EDK2>`_'s
-``edk2_json_generator.py`` does: take a TianoCore EDK II checkout, parse each
-``.inf`` module into a CycloneDX component (via :class:`uswid.format_inf.uSwidFormatInf`),
-incorporate it under a parent EDK2 SBOM, and merge everything into one
-``edk2.cdx.json`` that we then validate against the UEFI SBOM Guidelines (CISA
-Level 1) shape.
+SBOM4EDK2 now drives assembly via ``uswid --find … --primary-dir …`` (see the
+``uswid`` CLI in ``uswid/cli.py``); this module still contains the in-process validation path
+(parse each ``.inf`` with :class:`uswid.format_inf.uSwidFormatInf`, fold in
+:mod:`uswid.submodule` materialisation, merge into one ``edk2.cdx.json``) plus
+``test_primary_dir_cli_end_to_end``, which shells out to the real ``uswid`` CLI
+to assert the same assembly path consumers use. Output is checked against the
+UEFI SBOM Guidelines (CISA Level 1) shape.
 
 Gating and configuration are intentionally environment-variable driven so the
 test stays compatible with both the project's primary ``unittest`` workflow and

@@ -325,6 +325,8 @@ To do this, it uses specific hardcoded filenames for different SBOM formats, for
 
 To use this functionality, use something like `uswid --find ~/Code/edk2 --save sbom.uswid`
 
+For a [TianoCore EDK II](https://github.com/tianocore/edk2) tree, `--find` also discovers `*.inf` module descriptors. Combine `--primary-dir` (same tree root) with `--fallback-path` (a directory of per-submodule CycloneDX templates, e.g. from [uswid-data](https://github.com/hughsie/uswid-data)), optional `--load` of a parent EDK2 template, then `--fixup` and `--save` to produce one CycloneDX file: `uswid` walks `.gitmodules` recursively, resolves each template’s `@VCS_*@` placeholders against the matching submodule’s git state, drops templates that do not match any submodule, and wires `dependencies[]`. Project-agnostic helpers live in `uswid.submodule`; EDK II–only glue is in `uswid.edk2`.
+
 # VEX
 
 The `uswid` binary can load VEX data from [OpenVEX](https://github.com/openvex) and [CSAF-2.0](https://docs.oasis-open.org/csaf/csaf/v2.0/csaf-v2.0.html) files, and will generate a report for the end-user.
