@@ -88,6 +88,17 @@ class uSwidContainer:
         """Add an component to the container"""
         self._components.append(component)
 
+    def remove(self, component: uSwidComponent) -> bool:
+        """Remove *component* from the container if present.
+
+        Returns ``True`` when the component was removed.
+        """
+        try:
+            self._components.remove(component)
+            return True
+        except ValueError:
+            return False
+
     def add_vex_document(self, vex_document: uSwidVexDocument) -> None:
         """Add a VEX document"""
         self.vex_documents.append(vex_document)

@@ -187,6 +187,66 @@ def _container_merge_from_filepath(
             )
 
 
+def _pick_primary_component(
+    container: uSwidContainer,
+    primary_tag_id: Optional[str],
+) -> Optional[uSwidComponent]:
+    """Return the component selected by ``--primary``, else the first in *container*."""
+    if primary_tag_id:
+        for component in container:
+            candidates = {component.tag_id, component.cpe}
+            if component.purl:
+                candidates.add(str(component.purl))
+            if primary_tag_id in candidates:
+                return component
+    return next(iter(container), None)
+
+
+def _remerge_primary_template(
+    container: uSwidContainer,
+    primary_component: uSwidComponent,
+    primary_dir_abs: str,
+    fixup: bool,
+    verbose: bool,
+) -> Optional[uSwidComponent]:
+    """Re-load the primary SBOM template against *primary_dir_abs*.
+
+    ``--load`` substitutes ``@VCS_*@`` against the template file's directory
+    (often not a git checkout). When ``--primary-dir`` is set, the parent
+    firmware template must be resolved against that checkout instead. The
+    ``bom-ref`` changes when placeholders are fixed (e.g. ``@NOASSERTION`` →
+    ``@202602``), so the stale primary is removed before re-merge.
+    """
+    if not primary_component.source_filenames:
+        return primary_component
+    filepath = primary_component.source_filenames[0]
+    base = _detect_format(filepath)
+    if not base:
+        return primary_component
+
+    was_primary = primary_component.is_primary
+    primary_name = primary_component.software_name
+    container.remove(primary_component)
+
+    base.verbose = verbose
+    _container_merge_from_filepath(
+        container, base, filepath, dirpath=primary_dir_abs, fixup=fixup
+    )
+
+    reloaded: Optional[uSwidComponent] = None
+    for component in container:
+        if filepath in component.source_filenames:
+            if primary_name and component.software_name != primary_name:
+                continue
+            reloaded = component
+            break
+    if reloaded is None:
+        reloaded = _pick_primary_component(container, None)
+    if reloaded is not None and was_primary:
+        reloaded.is_primary = True
+    return reloaded
+
+
 def main():
     """Main entrypoint"""
     parser = argparse.ArgumentParser(
@@ -339,15 +399,16 @@ def main():
         metavar="DIR",
         default=None,
         help=(
-            "Source-tree root of the primary component. When set, uswid walks "
-            "DIR/.gitmodules recursively, re-merges any --fallback-path SBOM "
-            "templates against the matching submodule's actual directory "
-            "(so @VCS_*@ placeholders resolve to each submodule's git state), "
-            "drops orphan templates with no matching submodule, and synthesises "
-            "minimal CycloneDX components for submodules that have no curated "
-            "template. The resulting components feed into --fixup's containment-"
-            "based dependency wiring to produce a complete CycloneDX dependencies[] "
-            "tree per UEFI SBOM Guidelines §3.1.9."
+            "Source-tree root of the primary component. When set, uswid re-merges "
+            "the loaded primary template (--load) against DIR so @VCS_*@ placeholders "
+            "resolve to the checkout's git state (not the template file's directory), "
+            "walks DIR/.gitmodules recursively, re-merges any --fallback-path SBOM "
+            "templates against each matching submodule's directory, drops orphan "
+            "templates with no matching submodule, and synthesises minimal CycloneDX "
+            "components for submodules that have no curated template. The resulting "
+            "components feed into --fixup's containment-based dependency wiring to "
+            "produce a complete CycloneDX dependencies[] tree per UEFI SBOM "
+            "Guidelines §3.1.9."
         ),
     )
     args = parser.parse_args()
@@ -513,19 +574,18 @@ def main():
         url_to_path = walk_gitmodules(primary_dir_abs)
 
         # Identify the primary candidate: --primary if given, else the first
-        # already-loaded component. Used as the parent for synthesised
-        # submodule components and as the anchor for source_dir.
-        primary_component: Optional[uSwidComponent] = None
-        if args.primary_tag_id:
-            for c in container:
-                candidates = {c.tag_id, c.cpe}
-                if c.purl:
-                    candidates.add(str(c.purl))
-                if args.primary_tag_id in candidates:
-                    primary_component = c
-                    break
-        if primary_component is None:
-            primary_component = next(iter(container), None)
+        # already-loaded component. Re-merge its source template against the
+        # checkout root so @VCS_*@ placeholders resolve (SBOM4EDK2 loads
+        # edk2.cdx.json from uswid-data, not from the EDK II tree).
+        primary_component = _pick_primary_component(container, args.primary_tag_id)
+        if primary_component is not None:
+            primary_component = _remerge_primary_template(
+                container,
+                primary_component,
+                primary_dir_abs,
+                args.fixup,
+                args.verbose,
+            )
         if primary_component is not None:
             primary_component.source_dir = primary_dir_abs
 

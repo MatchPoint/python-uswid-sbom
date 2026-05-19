@@ -8,6 +8,8 @@ This library adheres to `Semantic Versioning <http://semver.org/>`_.
 **v0.2.1** (unreleased)
 
  - ``patches_for_commits_since_tag``: default CycloneDX pedigree patch type for post-tag commits is ``cherry-pick`` (was ``backport``). ``security`` is still used when a commit message contains a CVE ID. Bare-commit submodule pins without a release tag still emit a single ``cherry-pick`` pedigree note (HP Development Company)
+ - CycloneDX: emit ``metadata.tools[]`` as ``USWID SBOM`` with the installed package version; seed ``metadata.authors[]`` with Richard Hughes and Brian Mullen before merging component tag creators (HP Development Company)
+ - CLI: when ``--primary-dir`` is set, re-merge the loaded primary SBOM template (from ``--load``) against the checkout root so ``@VCS_*@`` placeholders resolve to the parent tree's git state, not the template file's directory (fixes ``NOASSERTION`` primary version/CPE when SBOM4EDK2 loads ``edk2.cdx.json`` from uswid-data). Adds ``uSwidContainer.remove()`` and ``tests/edk2/sbom.template.cdx.json``; integration tests ``test_primary_dir_cli_end_to_end`` and ``test_primary_dir_resolves_parent_vcs_placeholders`` assert ``metadata.component`` version and CPE (HP Development Company)
 
 **v0.2.0** (2026-05-18 — submodule mechanics promoted to public API; ``uswid --primary-dir`` end-to-end EDK2 SBOM assembly)
 

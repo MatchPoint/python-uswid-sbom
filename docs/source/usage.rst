@@ -77,7 +77,7 @@ Git submodules (library API)
 
 This fork adds :mod:`uswid.submodule` for working with ``.gitmodules`` trees in a project-agnostic way: URL canonicalisation, recursive walks, ``git describe`` normalisation for NVD/CPE-friendly versions, and building :class:`uswid.component.uSwidComponent` instances for each submodule. EDK II–specific helpers and package lists are in :mod:`uswid.edk2`.
 
-See :doc:`versionhistory` (v0.2.0) for the CLI flag ``--primary-dir``, which re-merges ``--fallback-path`` templates against submodule checkouts and prepares a container for ``--fixup``.
+See :doc:`versionhistory` (v0.2.0–v0.2.1) for the CLI flag ``--primary-dir``: it re-merges the loaded primary template (``--load``) and each ``--fallback-path`` template against the EDK II checkout and its submodules so ``@VCS_*@`` placeholders resolve to real git state, then prepares the container for ``--fixup``.
 
 ``patches_for_commits_since_tag`` (v0.2.1) walks ``git log <tag>..HEAD`` and emits one CycloneDX pedigree patch per commit: ``security`` when the message contains a CVE ID, otherwise ``cherry-pick`` (commits applied on top of the last upstream release tag, e.g. cmocka at ``1.1.5`` with 23 post-tag commits).
 

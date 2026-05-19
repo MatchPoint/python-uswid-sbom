@@ -1,0 +1,48 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "authors": [
+      {
+        "name": "@VCS_SBOM_AUTHORS@"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "firmware",
+      "bom-ref": "pkg:github/tianocore/edk2@@VCS_TAG@",
+      "cpe": "cpe:2.3:a:tianocore:edk2:@VCS_TAG@:*:*:*:*:*:*:*",
+      "name": "EDK II",
+      "version": "@VCS_VERSION@",
+      "description": "A cross-platform firmware development environment for UEFI and PI specifications",
+      "authors": [
+        {
+          "name": "@VCS_AUTHORS@"
+        }
+      ],
+      "supplier": {
+        "name": "TianoCore",
+        "url": ["https://www.tianocore.org"]
+      },
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://www.tianocore.org/"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/tianocore/edk2"
+        }
+      ]
+    }
+  ]
+}

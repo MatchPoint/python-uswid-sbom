@@ -189,12 +189,20 @@ class TestSwidEntity(unittest.TestCase):
     "timestamp": "2024-01-01T00:00:00.000000+00:00",
     "tools": [
       {
-        "vendor": "uSWID Authors",
-        "name": "uSWID",
+        "vendor": "MatchPoint",
+        "name": "USWID SBOM",
         "version": "@USWID_VERSION@"
       }
     ],
     "authors": [
+      {
+        "name": "Richard Hughes",
+        "email": "richard@hughsie.com"
+      },
+      {
+        "name": "Brian Mullen",
+        "email": "brian.desmond.mullen@gmail.com"
+      },
       {
         "name": "RH"
       }
@@ -350,6 +358,11 @@ class TestSwidEntity(unittest.TestCase):
             container.get_by_id("pkg:github/tianocore/edk2", fuzzy=True)
         )
         self.assertIsNotNone(container.get_by_id("pkg:edk2", fuzzy=True))
+
+        component = container.get_by_id("pkg:github/tianocore/edk2@202411")
+        self.assertTrue(container.remove(component))
+        self.assertIsNone(container.get_by_id("pkg:github/tianocore/edk2@202411"))
+        self.assertFalse(container.remove(component))
 
     def test_vcs(self):
         """Unit tests for uSwidVcs"""

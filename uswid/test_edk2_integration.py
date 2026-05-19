@@ -10,13 +10,16 @@
 """End-to-end EDK2 SBOM integration test (SBOM4EDK2 parity).
 
 This test exercises ``uswid``'s CycloneDX writer against a real EDK II source tree.
-SBOM4EDK2 now drives assembly via ``uswid --find … --primary-dir …`` (see the
-``uswid`` CLI in ``uswid/cli.py``); this module still contains the in-process validation path
+SBOM4EDK2 now drives assembly via ``uswid --load … --primary-dir …`` (see
+``uswid/cli.py``); this module still contains the in-process validation path
 (parse each ``.inf`` with :class:`uswid.format_inf.uSwidFormatInf`, fold in
 :mod:`uswid.submodule` materialisation, merge into one ``edk2.cdx.json``) plus
-``test_primary_dir_cli_end_to_end``, which shells out to the real ``uswid`` CLI
-to assert the same assembly path consumers use. Output is checked against the
-UEFI SBOM Guidelines (CISA Level 1) shape.
+CLI tests ``test_primary_dir_cli_end_to_end`` and
+``test_primary_dir_resolves_parent_vcs_placeholders``, which shell out to
+``uswid`` and assert submodule placeholders, primary ``metadata.component``
+version/CPE (including ``tests/edk2/sbom.template.cdx.json`` with ``@VCS_*@``),
+and a wired ``dependencies[]`` graph. Output is checked against the UEFI SBOM
+Guidelines (CISA Level 1) shape.
 
 Gating and configuration are intentionally environment-variable driven so the
 test stays compatible with both the project's primary ``unittest`` workflow and
@@ -87,6 +90,7 @@ from .submodule import (
 _REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 _DEFAULT_REF = "edk2-stable202411"
 _PARENT_FIXTURE = os.path.join(_REPO_ROOT, "tests", "edk2", "sbom.cdx.json")
+_PARENT_TEMPLATE = os.path.join(_REPO_ROOT, "tests", "edk2", "sbom.template.cdx.json")
 _CACHE_ROOT = os.path.join(_REPO_ROOT, "tests", "_edk2_cache")
 
 
@@ -211,6 +215,29 @@ def _load_parent_container() -> uSwidContainer:
     fmt = uSwidFormatCycloneDX()
     with open(_PARENT_FIXTURE, "rb") as f:
         return fmt.load(f.read())
+
+
+def _assert_primary_metadata_resolved(
+    test_case: unittest.TestCase,
+    primary: dict,
+    edk2_dir: str,
+) -> None:
+    """Assert CycloneDX ``metadata.component`` reflects the EDK II checkout."""
+    _, _, expected_cpe_ver = describe_edk2_version(edk2_dir)
+    test_case.assertEqual(primary.get("name"), "EDK II")
+    test_case.assertNotEqual(
+        primary.get("version"),
+        "NOASSERTION",
+        "primary version must come from the EDK II checkout git describe",
+    )
+    cpe = primary.get("cpe") or ""
+    test_case.assertNotIn("NOASSERTION", cpe)
+    test_case.assertIn(
+        f":edk2:{expected_cpe_ver}:",
+        cpe,
+        f"primary CPE must include YYYYMM {expected_cpe_ver!r} from checkout",
+    )
+    test_case.assertNotIn("@VCS_", json.dumps(primary))
 
 
 def _build_per_inf_container(
@@ -673,11 +700,18 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
         CycloneDX SBOM that is:
 
         * non-empty (``components[]`` populated),
-        * placeholder-free (no surviving ``@VCS_*@`` substrings — orphan
-          fallback templates must have been dropped, matched ones must have
-          had their placeholders resolved against the submodule's git),
+        * primary ``metadata.component`` version and CPE resolved from the
+          checkout (not ``NOASSERTION``),
+        * placeholder-free in ``components[]`` (no surviving ``@VCS_*@`` —
+          orphan fallback templates dropped, matched ones resolved per
+          submodule git),
         * structurally complete (``dependencies[]`` present, primary has
           at least one ``dependsOn`` entry).
+
+        Loads ``tests/edk2/sbom.template.cdx.json`` (``@VCS_*@`` placeholders,
+        same shape as SBOM4EDK2 ``uswid-data/edk2.cdx.json``) so the primary
+        must be re-merged against the checkout; the resolved fixture
+        ``tests/edk2/sbom.cdx.json`` is still used by the in-process path.
 
         The fallback path is optional: when the running developer has a
         local uswid-data clone we point at it, otherwise we still run the
@@ -688,24 +722,14 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
         if os.path.exists(out_path):
             os.unlink(out_path)
 
-        # The primary fixture's bom-ref is static (matching the upstream-published
-        # tag at the time the fixture was authored). Match against it directly
-        # rather than self.purl_version, which is computed from the running
-        # checkout's git describe and may be newer than the fixture.
-        with open(_PARENT_FIXTURE, "rb") as f:
-            fixture = json.load(f)
-        fixture_bom_ref = fixture["components"][0]["bom-ref"]
-
         cmd = [
             sys.executable,
             "-m",
             "uswid.cli",
             "--load",
-            _PARENT_FIXTURE,
+            _PARENT_TEMPLATE,
             "--primary-dir",
             self.edk2_dir,
-            "--primary",
-            fixture_bom_ref,
             "--fixup",
             "--save",
             out_path,
@@ -740,7 +764,7 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
         self.assertEqual(data["bomFormat"], "CycloneDX")
         self.assertIn("component", data.get("metadata", {}))
         primary = data["metadata"]["component"]
-        self.assertEqual(primary["name"], "EDK II")
+        _assert_primary_metadata_resolved(self, primary, self.edk2_dir)
 
         components = data.get("components") or []
         self.assertGreater(
@@ -771,6 +795,67 @@ class TestEdk2IntegrationSbom(unittest.TestCase):
             f"no dependencies[] entry for the primary bom-ref {primary_ref!r}",
         )
         self.assertTrue(primary_dep_entries[0]["dependsOn"])
+
+    def test_primary_dir_resolves_parent_vcs_placeholders(self) -> None:
+        """``--primary-dir`` must resolve @VCS_*@ on the loaded parent template.
+
+        SBOM4EDK2 loads ``edk2.cdx.json`` from uswid-data (not the checkout).
+        Without re-merge against ``--primary-dir``, the primary stays
+        ``NOASSERTION`` and GHSA cannot filter by EDK II release (YYYYMM).
+        """
+        out_path = os.path.join(
+            self.cache_dir, "edk2.primary-dir-template-cli.cdx.json"
+        )
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "uswid.cli",
+            "--load",
+            _PARENT_TEMPLATE,
+            "--primary-dir",
+            self.edk2_dir,
+            "--fixup",
+            "--save",
+            out_path,
+            "--format",
+            "cyclonedx",
+        ]
+        fallback_path = os.environ.get("USWID_DATA_DIR")
+        if fallback_path and os.path.isdir(fallback_path):
+            cmd += ["--fallback-path", fallback_path]
+
+        try:
+            subprocess.check_output(
+                cmd, stderr=subprocess.STDOUT, cwd=_REPO_ROOT, timeout=600
+            )
+        except subprocess.CalledProcessError as exc:
+            self.fail(
+                f"uswid --primary-dir + template load failed (rc={exc.returncode}):\n"
+                f"{exc.output.decode('utf-8', errors='replace')[:4000]}"
+            )
+
+        with open(out_path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+
+        primary = data.get("metadata", {}).get("component") or {}
+        _assert_primary_metadata_resolved(self, primary, self.edk2_dir)
+
+        components = data.get("components") or []
+        leftover = [
+            c
+            for c in components
+            if any(
+                "@VCS_" in str(v) for v in c.values() if isinstance(v, str)
+            )
+        ]
+        self.assertEqual(
+            leftover,
+            [],
+            f"{len(leftover)} components retain @VCS_*@ placeholders",
+        )
 
 
 if __name__ == "__main__":
