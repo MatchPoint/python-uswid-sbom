@@ -79,3 +79,5 @@ This fork adds :mod:`uswid.submodule` for working with ``.gitmodules`` trees in 
 
 See :doc:`versionhistory` (v0.2.0) for the CLI flag ``--primary-dir``, which re-merges ``--fallback-path`` templates against submodule checkouts and prepares a container for ``--fixup``.
 
+``patches_for_commits_since_tag`` (v0.2.1) walks ``git log <tag>..HEAD`` and emits one CycloneDX pedigree patch per commit: ``security`` when the message contains a CVE ID, otherwise ``cherry-pick`` (commits applied on top of the last upstream release tag, e.g. cmocka at ``1.1.5`` with 23 post-tag commits).
+

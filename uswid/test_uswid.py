@@ -854,7 +854,7 @@ class TestSwidEntity(unittest.TestCase):
                 "/tmp", "v1.0", "https://github.com/o/r"
             )
         self.assertEqual(len(patches), 3)
-        self.assertEqual(patches[0].type, uSwidPatchType.BACKPORT)
+        self.assertEqual(patches[0].type, uSwidPatchType.CHERRY_PICK)
         self.assertEqual(patches[0].description, "First fix after tag")
         self.assertEqual(
             patches[0].url,
@@ -863,7 +863,7 @@ class TestSwidEntity(unittest.TestCase):
         self.assertEqual(patches[1].type, uSwidPatchType.SECURITY)
         self.assertEqual(patches[1].description, "Fix CVE-2024-9999 in parser")
         self.assertIn("CVE-2024-9999", patches[1].references)
-        self.assertEqual(patches[2].type, uSwidPatchType.BACKPORT)
+        self.assertEqual(patches[2].type, uSwidPatchType.CHERRY_PICK)
 
     def test_patches_for_commits_since_tag_empty_log(self):
         """patches_for_commits_since_tag returns [] when git log is empty."""

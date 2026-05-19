@@ -5,6 +5,10 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**v0.2.1** (unreleased)
+
+ - ``patches_for_commits_since_tag``: default CycloneDX pedigree patch type for post-tag commits is ``cherry-pick`` (was ``backport``). ``security`` is still used when a commit message contains a CVE ID. Bare-commit submodule pins without a release tag still emit a single ``cherry-pick`` pedigree note (HP Development Company)
+
 **v0.2.0** (2026-05-18 — submodule mechanics promoted to public API; ``uswid --primary-dir`` end-to-end EDK2 SBOM assembly)
 
  - Add ``uswid/submodule.py``: generic (project-agnostic) Git submodule mechanics, designed for upstream contribution to ``hughsie/python-uswid``. Public APIs: ``canonicalize_vcs_url``, ``resolve_with_aliases``, ``parse_gitmodules_file``, ``walk_gitmodules``, ``normalize_submodule_version``, ``resolve_submodule_vcs``, ``patches_for_commits_since_tag``, ``make_submodule_components``; module-level constants ``SUBMODULE_URL_ALIASES`` (GitHub org-rename aliases for Mbed-TLS, libfdt, etc.) and ``SUBMODULE_CPE_MAP`` (NVD-verified CPE entries for openssl, mbedtls, jansson, oniguruma, brotli, libspdm) (HP Development Company)

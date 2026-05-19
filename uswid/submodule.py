@@ -314,7 +314,7 @@ def patches_for_commits_since_tag(
     Each patch carries the commit subject as ``description`` and a commit
     URL (when *vcs_url* is an ``http(s)`` URL). Patches mentioning a CVE
     identifier are typed :attr:`uSwidPatchType.SECURITY`; otherwise
-    :attr:`uSwidPatchType.BACKPORT`.
+    :attr:`uSwidPatchType.CHERRY_PICK` (commits on top of a release tag).
     """
     _sep = "---USWID_COMMIT_END---"
     try:
@@ -347,7 +347,7 @@ def patches_for_commits_since_tag(
         desc = (current_subject or "").strip()
         if len(desc) > 500:
             desc = desc[:497] + "..."
-        ptype = uSwidPatchType.SECURITY if cves else uSwidPatchType.BACKPORT
+        ptype = uSwidPatchType.SECURITY if cves else uSwidPatchType.CHERRY_PICK
         patches.append(
             uSwidPatch(
                 type=ptype,
