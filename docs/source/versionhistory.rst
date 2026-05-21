@@ -5,7 +5,7 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
-**v0.2.1** (unreleased)
+**v0.2.1** (2026-05-19)
 
  - ``patches_for_commits_since_tag``: default CycloneDX pedigree patch type for post-tag commits is ``cherry-pick`` (was ``backport``). ``security`` is still used when a commit message contains a CVE ID. Bare-commit submodule pins without a release tag still emit a single ``cherry-pick`` pedigree note (HP Development Company)
  - CycloneDX: emit ``metadata.tools[]`` as ``USWID SBOM`` with the installed package version; seed ``metadata.authors[]`` with Richard Hughes and Brian Mullen before merging component tag creators (HP Development Company)
