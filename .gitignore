@@ -64,5 +64,7 @@ docs/uefi/
 # Integration test cache (EDK2 clone)
 tests/_edk2_cache/
 
-# IDE configuration — local only, not for version control
-.cursor/
+# IDE configuration — local only, not for version control (except shared rules)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**

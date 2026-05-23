@@ -1,0 +1,37 @@
+---
+description: MatchPoint SBOM ecosystem — repo boundaries and forbidden cross-layer changes
+alwaysApply: true
+---
+
+# Ecosystem architecture (MatchPoint SBOM stack)
+
+Read **AGENTS.md** in this repo before changing EDK2 or assembly behavior.
+
+## Ownership
+
+| Layer | Repo | Owns |
+|-------|------|------|
+| SBOM creation | **python-uswid-sbom** (`uswid`) | `--primary-dir`, `uswid/submodule.py`, `uswid/edk2.py`, format writers, UEFI compliance |
+| CVE analysis | **SBOM4EDK2** | NVD, Grype, GHSA, `generate_sbom_from_checkout` (thin `uswid` subprocess only) |
+| Quarterly VEX | **VEX4EDK2** | `vex4edk2.batch`, CSAF writer, `releases/` artifacts |
+
+## Forbidden in downstream repos (SBOM4EDK2, VEX4EDK2)
+
+- Per-`.inf` thread pools, manual CycloneDX merge, `_merge_inf_cdx_direct`-style helpers
+- Duplicating `walk_gitmodules`, `normalize_submodule_version`, or `@VCS_*@` substitution
+- Importing `uswid.edk2` from production orchestration code in those repos
+
+## Forbidden in this repo (python-uswid-sbom)
+
+- CVE/NVD/GHSA scanning or CSAF VEX batch logic
+- Git clone orchestration for quarterly releases (belongs in VEX4EDK2)
+
+## Module seam in this repo
+
+- **Generic:** `uswid/submodule.py` — no EDK2 references
+- **EDK2-only:** `uswid/edk2.py` — not imported by `uswid/cli.py`
+- New EDK2 assembly behavior → extend `--primary-dir` / `submodule.py`, not SBOM4EDK2
+
+## Fork edits
+
+Append-only on `cli.py`, `component.py`, `entity.py`, `format_cyclonedx.py`, `format_spdx.py` when possible. Do not edit upstream-identical files without explicit direction.

@@ -327,6 +327,8 @@ To use this functionality, use something like `uswid --find ~/Code/edk2 --save s
 
 For a [TianoCore EDK II](https://github.com/tianocore/edk2) tree, `--find` also discovers `*.inf` module descriptors. Combine `--primary-dir` (same tree root) with `--fallback-path` (a directory of per-submodule CycloneDX templates, e.g. from [uswid-data](https://github.com/hughsie/uswid-data)), optional `--load` of a parent EDK2 template with `@VCS_*@` placeholders, then `--fixup` and `--save` to produce one CycloneDX file: `uswid` re-merges the parent template against the checkout root (so the primary EDK II version and CPE use the tree’s `git describe`, e.g. `202602`), walks `.gitmodules` recursively, resolves each fallback template’s `@VCS_*@` placeholders against the matching submodule’s git state, drops templates that do not match any submodule, and wires `dependencies[]`. Project-agnostic helpers live in `uswid.submodule`; EDK II–only glue is in `uswid.edk2`.
 
+> **AI agents / contributors:** See [`AGENTS.md`](AGENTS.md) for ecosystem boundaries (this repo vs SBOM4EDK2 vs VEX4EDK2) and fork constraints.
+
 # VEX
 
 The `uswid` binary can load VEX data from [OpenVEX](https://github.com/openvex) and [CSAF-2.0](https://docs.oasis-open.org/csaf/csaf/v2.0/csaf-v2.0.html) files, and will generate a report for the end-user.

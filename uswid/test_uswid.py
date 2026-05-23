@@ -1063,7 +1063,7 @@ rel = see-also
         # CycloneDX export
         tmp = uSwidFormatCycloneDX().save(uSwidContainer([component])).decode()
         assert "CycloneDX" in tmp
-        assert "uSWID" in tmp
+        assert "USWID SBOM" in tmp
         assert "org.hughski.colorhug" in tmp
         assert "22905301d08e69473393d94c3e787e4bf0453268" in tmp
         assert "manufacturer" in tmp
@@ -1472,10 +1472,10 @@ class TestUefiSbomGuidelinesConformance(unittest.TestCase):
         self.assertEqual(
             primary["supplier"]["contact"][0]["email"], "contact@tianocore.org"
         )
-        # author email also surfaces at metadata.authors[].email
+        # author email also surfaces at metadata.authors[].email (after SBOM tool authors)
         authors = data["metadata"]["authors"]
-        self.assertEqual(authors[0]["name"], "Tianocore Maintainers")
-        self.assertEqual(authors[0]["email"], "devel@edk2.groups.io")
+        edk2_author = next(a for a in authors if a["name"] == "Tianocore Maintainers")
+        self.assertEqual(edk2_author["email"], "devel@edk2.groups.io")
 
     def test_cdx_copyright_emitted_and_round_trips(self):
         """UEFI §3.1.11: component.copyright is emitted and reloads identical."""
